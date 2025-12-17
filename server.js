@@ -1,9 +1,10 @@
-require("dotenv").config();
 const express = require("express");
 const helmet = require("helmet");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const axios = require("axios");
+const logger = require("./logger");
+const config = require("./config");
 
 const app = express();
 
@@ -11,19 +12,19 @@ const app = express();
 app.use(helmet());
 
 // CORS configuration
-const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",") || [];
-
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (mobile apps, curl, etc.)
       if (!origin) return callback(null, true);
 
-      if (allowedOrigins.includes(origin)) {
+      if (config.allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
-        callback(null, true); // For development, allow all origins
-        // For production: callback(new Error('Not allowed by CORS'));
+        if (config.isProduction) {
+          callback(new Error("Not allowed by CORS"));
+        } else {
+          callback(null, true);
+        }
       }
     },
     credentials: true,
@@ -34,10 +35,25 @@ app.use(
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
+// Request logging middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    logger.http({
+      method: req.method,
+      url: req.url,
+      status: res.statusCode,
+      duration: Date.now() - start,
+      ip: req.ip,
+    });
+  });
+  next();
+});
+
 // Rate limiting to prevent abuse
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: "Too many requests from this IP, please try again later",
   standardHeaders: true,
   legacyHeaders: false,
@@ -56,7 +72,8 @@ const tokenLimiter = rateLimit({
 const verifyApiKey = (req, res, next) => {
   const apiKey = req.headers["x-api-key"];
 
-  if (!apiKey || apiKey !== process.env.API_KEY) {
+  if (!apiKey || apiKey !== config.apiKey) {
+    logger.warn("Unauthorized API key attempt", { ip: req.ip });
     return res.status(401).json({ error: "Unauthorized: Invalid API key" });
   }
 
@@ -65,10 +82,10 @@ const verifyApiKey = (req, res, next) => {
 
 // eBay Configuration
 const EBAY_CONFIG = {
-  clientId: process.env.EBAY_APP_ID,
-  clientSecret: process.env.EBAY_CERT_ID,
-  redirectUri: process.env.EBAY_REDIRECT_URI,
-  useSandbox: process.env.USE_SANDBOX === "true",
+  clientId: config.ebay.appId,
+  clientSecret: config.ebay.certId,
+  redirectUri: config.ebay.redirectUri,
+  useSandbox: config.ebay.useSandbox,
 
   get tokenUrl() {
     return this.useSandbox
@@ -90,32 +107,12 @@ const EBAY_CONFIG = {
   ].join(" "),
 };
 
-// Validate environment variables
-const validateEnv = () => {
-  const required = [
-    "EBAY_APP_ID",
-    "EBAY_CERT_ID",
-    "EBAY_REDIRECT_URI",
-    "API_KEY",
-  ];
-  const missing = required.filter((key) => !process.env[key]);
-
-  if (missing.length > 0) {
-    console.error(
-      `Missing required environment variables: ${missing.join(", ")}`
-    );
-    process.exit(1);
-  }
-};
-
-validateEnv();
-
 // ═══════════════════════════════════════════════════════════════
 // APPLICATION TOKEN HELPER (for Taxonomy API)
 // ═══════════════════════════════════════════════════════════════
 async function getApplicationToken() {
   try {
-    console.log("🔐 Generating application token for Taxonomy API...");
+    logger.debug("Generating application token for Taxonomy API");
 
     const credentials = Buffer.from(
       `${EBAY_CONFIG.clientId}:${EBAY_CONFIG.clientSecret}`
@@ -135,13 +132,13 @@ async function getApplicationToken() {
       }
     );
 
-    console.log("✅ Application token generated");
+    logger.debug("Application token generated successfully");
     return response.data.access_token;
   } catch (error) {
-    console.error(
-      "❌ Application token error:",
-      error.response?.data || error.message
-    );
+    logger.error("Application token generation failed", {
+      error: error.message,
+      status: error.response?.status,
+    });
     throw error;
   }
 }
@@ -152,7 +149,12 @@ async function getApplicationToken() {
 
 // Health check endpoint
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: config.nodeEnv,
+  });
 });
 
 // Generate authorization URL
@@ -168,14 +170,14 @@ app.get("/api/ebay/auth-url", verifyApiKey, (req, res) => {
     url.searchParams.set("scope", EBAY_CONFIG.scopes);
     url.searchParams.set("state", state);
 
-    console.log("📱 Auth URL requested, state:", state);
+    logger.info("Auth URL requested", { state });
 
     res.json({
       url: url.toString(),
       state: state,
     });
   } catch (error) {
-    console.error("Auth URL error:", error);
+    logger.error("Auth URL generation failed", { error: error.message });
     res.status(500).json({ error: error.message });
   }
 });
@@ -193,7 +195,7 @@ app.post(
         return res.status(400).json({ error: "Code and state are required" });
       }
 
-      console.log("🔑 Exchanging code for token, state:", state);
+      logger.info("Exchanging authorization code", { state });
 
       const credentials = Buffer.from(
         `${EBAY_CONFIG.clientId}:${EBAY_CONFIG.clientSecret}`
@@ -214,7 +216,7 @@ app.post(
         }
       );
 
-      console.log("✅ Token exchange successful");
+      logger.info("Token exchange successful");
 
       res.json({
         access_token: response.data.access_token,
@@ -223,10 +225,10 @@ app.post(
         token_type: response.data.token_type,
       });
     } catch (error) {
-      console.error(
-        "Token exchange error:",
-        error.response?.data || error.message
-      );
+      logger.error("Token exchange failed", {
+        error: error.message,
+        status: error.response?.status,
+      });
 
       const status = error.response?.status || 500;
       const message =
@@ -251,7 +253,7 @@ app.post(
         return res.status(400).json({ error: "Refresh token is required" });
       }
 
-      console.log("🔄 Refreshing token");
+      logger.info("Refreshing access token");
 
       const credentials = Buffer.from(
         `${EBAY_CONFIG.clientId}:${EBAY_CONFIG.clientSecret}`
@@ -272,7 +274,7 @@ app.post(
         }
       );
 
-      console.log("✅ Token refresh successful");
+      logger.info("Token refresh successful");
 
       res.json({
         access_token: response.data.access_token,
@@ -280,10 +282,10 @@ app.post(
         token_type: response.data.token_type,
       });
     } catch (error) {
-      console.error(
-        "Token refresh error:",
-        error.response?.data || error.message
-      );
+      logger.error("Token refresh failed", {
+        error: error.message,
+        status: error.response?.status,
+      });
 
       const status = error.response?.status || 500;
       const message =
@@ -316,11 +318,14 @@ app.get("/api/ebay/user-profile", verifyApiKey, async (req, res) => {
       },
     });
 
-    console.log("✅ User profile retrieved");
+    logger.info("User profile retrieved successfully");
 
     res.json(response.data);
   } catch (error) {
-    console.error("User profile error:", error.response?.data || error.message);
+    logger.error("User profile retrieval failed", {
+      error: error.message,
+      status: error.response?.status,
+    });
 
     const status = error.response?.status || 500;
     const message =
@@ -344,16 +349,14 @@ app.post("/api/ebay/suggest-category", verifyApiKey, async (req, res) => {
       return res.status(400).json({ error: "Title is required" });
     }
 
-    console.log(`🔍 Getting category suggestions for: "${title}"`);
+    logger.info("Getting category suggestions", { title });
 
-    // Get APPLICATION token (not user token)
     const appToken = await getApplicationToken();
 
     const baseUrl = EBAY_CONFIG.useSandbox
       ? "https://api.sandbox.ebay.com"
       : "https://api.ebay.com";
 
-    // Call Taxonomy API with application token
     const response = await axios.get(
       `${baseUrl}/commerce/taxonomy/v1/category_tree/0/get_category_suggestions`,
       {
@@ -369,9 +372,10 @@ app.post("/api/ebay/suggest-category", verifyApiKey, async (req, res) => {
 
     if (suggestions.length > 0) {
       const topCategory = suggestions[0].category;
-      console.log(
-        `✅ Suggested category: ${topCategory.categoryName} (${topCategory.categoryId})`
-      );
+      logger.info("Category suggestion found", {
+        categoryId: topCategory.categoryId,
+        categoryName: topCategory.categoryName,
+      });
 
       return res.json({
         categoryId: topCategory.categoryId,
@@ -383,20 +387,14 @@ app.post("/api/ebay/suggest-category", verifyApiKey, async (req, res) => {
       });
     }
 
-    // Fallback
-    console.log("⚠️ No suggestions found, using fallback");
+    logger.warn("No category suggestions found, using fallback");
     res.json({
       categoryId: "220",
       categoryName: "Toys & Hobbies",
       allSuggestions: [],
     });
   } catch (error) {
-    console.error(
-      "Category suggestion error:",
-      error.response?.data || error.message
-    );
-
-    // Return safe default on error
+    logger.error("Category suggestion failed", { error: error.message });
     res.json({
       categoryId: "220",
       categoryName: "Toys & Hobbies",
@@ -414,9 +412,8 @@ app.get(
     try {
       const { categoryId } = req.params;
 
-      console.log(`📋 Getting aspects for category: ${categoryId}`);
+      logger.info("Getting category aspects", { categoryId });
 
-      // Get APPLICATION token
       const appToken = await getApplicationToken();
 
       const baseUrl = EBAY_CONFIG.useSandbox
@@ -434,17 +431,16 @@ app.get(
         }
       );
 
-      console.log(
-        `✅ Got ${
-          response.data.aspects?.length || 0
-        } aspects for category ${categoryId}`
-      );
+      logger.info("Category aspects retrieved", {
+        categoryId,
+        aspectCount: response.data.aspects?.length || 0,
+      });
+
       res.json(response.data);
     } catch (error) {
-      console.error(
-        "Category aspects error:",
-        error.response?.data || error.message
-      );
+      logger.error("Category aspects retrieval failed", {
+        error: error.message,
+      });
       res.status(500).json({
         error: "Failed to get category aspects",
         details: error.response?.data,
@@ -482,19 +478,17 @@ app.post("/api/ebay/publish-listing", verifyApiKey, async (req, res) => {
       seoKeywords,
     } = req.body;
 
-    console.log("📦 Publishing:", { sku, title, price, categoryId });
+    logger.info("Publishing listing", { sku, title, price, categoryId });
 
     const baseUrl = EBAY_CONFIG.useSandbox
       ? "https://api.sandbox.ebay.com"
       : "https://api.ebay.com";
 
-    // ENSURE categoryId is valid (numeric)
     if (!categoryId || !/^\d+$/.test(categoryId)) {
-      console.log("⚠️ Invalid category ID, using default 220");
+      logger.warn("Invalid category ID, using default 220");
       categoryId = "220";
     }
 
-    // Build product data
     const productData = {
       title: title,
       description: description,
@@ -506,7 +500,6 @@ app.post("/api/ebay/publish-listing", verifyApiKey, async (req, res) => {
         }),
     };
 
-    // Add item specifics (aspects)
     if (itemSpecifics && Object.keys(itemSpecifics).length > 0) {
       const aspects = {};
       for (const [key, value] of Object.entries(itemSpecifics)) {
@@ -515,7 +508,6 @@ app.post("/api/ebay/publish-listing", verifyApiKey, async (req, res) => {
       productData.aspects = aspects;
     }
 
-    // Handle Brand/MPN for product identifiers
     if (itemSpecifics?.Brand) {
       productData.brand = itemSpecifics.Brand;
       productData.mpn = itemSpecifics?.MPN || "Does Not Apply";
@@ -527,7 +519,6 @@ app.post("/api/ebay/publish-listing", verifyApiKey, async (req, res) => {
         : [itemSpecifics.UPC];
     }
 
-    // Create inventory item
     const inventoryItemPayload = {
       availability: {
         shipToLocationAvailability: { quantity: quantity || 1 },
@@ -548,9 +539,8 @@ app.post("/api/ebay/publish-listing", verifyApiKey, async (req, res) => {
       }
     );
 
-    console.log("✅ Inventory item created");
+    logger.info("Inventory item created", { sku });
 
-    // Build full description with flaws
     let fullDescription = description;
     if (flaws && flaws.length > 0) {
       fullDescription += "\n\n<h3>Item Condition Notes:</h3><ul>";
@@ -566,7 +556,6 @@ app.post("/api/ebay/publish-listing", verifyApiKey, async (req, res) => {
       )}</small></p>`;
     }
 
-    // Create offer
     const offerPayload = {
       sku: sku,
       marketplaceId: "EBAY_US",
@@ -576,9 +565,9 @@ app.post("/api/ebay/publish-listing", verifyApiKey, async (req, res) => {
       categoryId: categoryId,
       merchantLocationKey: "default_location",
       listingPolicies: {
-        fulfillmentPolicyId: process.env.EBAY_FULFILLMENT_POLICY_ID,
-        paymentPolicyId: process.env.EBAY_PAYMENT_POLICY_ID,
-        returnPolicyId: process.env.EBAY_RETURN_POLICY_ID,
+        fulfillmentPolicyId: config.ebay.fulfillmentPolicyId,
+        paymentPolicyId: config.ebay.paymentPolicyId,
+        returnPolicyId: config.ebay.returnPolicyId,
       },
       pricingSummary: {
         price: {
@@ -612,9 +601,8 @@ app.post("/api/ebay/publish-listing", verifyApiKey, async (req, res) => {
     );
 
     const offerId = offerResponse.data.offerId;
-    console.log("✅ Offer created:", offerId);
+    logger.info("Offer created", { offerId });
 
-    // Publish offer
     const publishResponse = await axios.post(
       `${baseUrl}/sell/inventory/v1/offer/${offerId}/publish`,
       {},
@@ -628,7 +616,7 @@ app.post("/api/ebay/publish-listing", verifyApiKey, async (req, res) => {
     );
 
     const listingId = publishResponse.data.listingId;
-    console.log("✅ Listing published:", listingId);
+    logger.info("Listing published successfully", { listingId, sku });
 
     res.json({
       success: true,
@@ -639,7 +627,10 @@ app.post("/api/ebay/publish-listing", verifyApiKey, async (req, res) => {
       message: "Listing published successfully",
     });
   } catch (error) {
-    console.error("❌ Publish error:", error.response?.data || error.message);
+    logger.error("Publish listing failed", {
+      error: error.message,
+      status: error.response?.status,
+    });
 
     const status = error.response?.status || 500;
     const errorData = error.response?.data;
@@ -685,7 +676,7 @@ app.post("/api/ebay/opt-in-policies", verifyApiKey, async (req, res) => {
       ? "https://api.sandbox.ebay.com"
       : "https://api.ebay.com";
 
-    console.log("📝 Opting in to Business Policies...");
+    logger.info("Opting in to Business Policies");
 
     await axios.post(
       `${baseUrl}/sell/account/v1/program/opt_in`,
@@ -698,15 +689,14 @@ app.post("/api/ebay/opt-in-policies", verifyApiKey, async (req, res) => {
       }
     );
 
-    console.log("✅ Successfully opted in to Business Policies");
+    logger.info("Successfully opted in to Business Policies");
     res.json({
       success: true,
       message: "Successfully opted in to Business Policies Management",
     });
   } catch (error) {
-    console.error("Opt-in error:", error.response?.data || error.message);
+    logger.error("Opt-in failed", { error: error.message });
 
-    // If already opted in, that's okay
     if (error.response?.status === 409) {
       return res.json({
         success: true,
@@ -752,7 +742,7 @@ app.post("/api/ebay/create-location", verifyApiKey, async (req, res) => {
       locationTypes: ["WAREHOUSE"],
     };
 
-    console.log("📍 Creating inventory location...");
+    logger.info("Creating inventory location");
 
     const response = await axios.post(
       `${baseUrl}/sell/inventory/v1/location/default_location`,
@@ -765,16 +755,15 @@ app.post("/api/ebay/create-location", verifyApiKey, async (req, res) => {
       }
     );
 
-    console.log("✅ Location created: default_location");
+    logger.info("Location created successfully");
     res.json({
       success: true,
       locationKey: "default_location",
       message: "Inventory location created successfully",
     });
   } catch (error) {
-    console.error("Location error:", error.response?.data || error.message);
+    logger.error("Location creation failed", { error: error.message });
 
-    // If location already exists, that's okay
     if (error.response?.status === 409) {
       return res.json({
         success: true,
@@ -790,7 +779,7 @@ app.post("/api/ebay/create-location", verifyApiKey, async (req, res) => {
   }
 });
 
-// Upload image to eBay Media API - CORRECTED VERSION
+// Upload image to eBay Media API
 app.post("/api/ebay/upload-image", verifyApiKey, async (req, res) => {
   try {
     const authHeader = req.headers["authorization"];
@@ -805,31 +794,26 @@ app.post("/api/ebay/upload-image", verifyApiKey, async (req, res) => {
       return res.status(400).json({ error: "Image data is required" });
     }
 
-    console.log(`📸 Uploading image: ${filename || "unknown"}`);
+    logger.info("Uploading image", { filename });
 
-    // Media API base URL (different from other APIs)
     const baseUrl = EBAY_CONFIG.useSandbox
       ? "https://apim.sandbox.ebay.com"
       : "https://apim.ebay.com";
 
-    // Convert base64 to buffer
     const imageBuffer = Buffer.from(imageData, "base64");
     const fileSizeMB = (imageBuffer.length / (1024 * 1024)).toFixed(2);
 
-    console.log(`📦 Image size: ${fileSizeMB} MB`);
+    logger.debug("Image size", { sizeMB: fileSizeMB });
 
-    // Validate size (max 12 MB per eBay requirements)
     if (imageBuffer.length > 12 * 1024 * 1024) {
       return res.status(400).json({
         error: `Image too large: ${fileSizeMB} MB. Maximum is 12 MB`,
       });
     }
 
-    // Prepare multipart/form-data (as per eBay Media API docs)
     const FormData = require("form-data");
     const form = new FormData();
 
-    // Determine content type from filename
     const ext = (filename || "").toLowerCase();
     let contentType = "image/jpeg";
     if (ext.endsWith(".png")) contentType = "image/png";
@@ -841,18 +825,14 @@ app.post("/api/ebay/upload-image", verifyApiKey, async (req, res) => {
     else if (ext.endsWith(".heic")) contentType = "image/heic";
     else if (ext.endsWith(".avif")) contentType = "image/avif";
 
-    // Key must be 'image' as per eBay documentation
     form.append("image", imageBuffer, {
       filename: filename || "image.jpg",
       contentType: contentType,
     });
 
-    // CORRECT ENDPOINT: /commerce/media/v1_beta/image/create_image_from_file
     const endpoint = `${baseUrl}/commerce/media/v1_beta/image/create_image_from_file`;
-    console.log(`🔗 Uploading to: ${endpoint}`);
 
     try {
-      // Step 1: Upload image (returns 201 Created)
       const uploadResponse = await axios.post(endpoint, form, {
         headers: {
           ...form.getHeaders(),
@@ -863,29 +843,19 @@ app.post("/api/ebay/upload-image", verifyApiKey, async (req, res) => {
         validateStatus: (status) => status === 201 || status === 200,
       });
 
-      console.log(`✅ Upload response status: ${uploadResponse.status}`);
-
-      // Step 2: Extract image ID from Location header (REQUIRED per eBay docs)
       const locationHeader = uploadResponse.headers["location"];
       let imageId = null;
 
       if (locationHeader) {
-        // Location format: https://apim.ebay.com/commerce/media/v1_beta/image/{image_id}
         imageId = locationHeader.split("/").pop();
-        console.log(`📍 Image ID from Location header: ${imageId}`);
-      } else {
-        console.warn("⚠️ No Location header in response");
+        logger.debug("Image ID from Location header", { imageId });
       }
 
-      // Step 3: Get imageUrl from response body
       let imageUrl = uploadResponse.data?.imageUrl;
       let expirationDate = uploadResponse.data?.expirationDate;
 
-      // Step 4: If imageUrl not in response body, call getImage (as per eBay docs)
       if (!imageUrl && imageId) {
-        console.log(
-          `🔍 Calling getImage to retrieve imageUrl for ID: ${imageId}`
-        );
+        logger.debug("Calling getImage to retrieve imageUrl");
 
         try {
           const getImageResponse = await axios.get(
@@ -899,9 +869,10 @@ app.post("/api/ebay/upload-image", verifyApiKey, async (req, res) => {
 
           imageUrl = getImageResponse.data?.imageUrl;
           expirationDate = getImageResponse.data?.expirationDate;
-          console.log(`✅ Retrieved imageUrl via getImage: ${imageUrl}`);
         } catch (getError) {
-          console.error(`⚠️ Failed to get image details: ${getError.message}`);
+          logger.warn("Failed to get image details", {
+            error: getError.message,
+          });
         }
       }
 
@@ -909,9 +880,7 @@ app.post("/api/ebay/upload-image", verifyApiKey, async (req, res) => {
         throw new Error("Failed to retrieve image URL from eBay Media API");
       }
 
-      console.log("✅ Image uploaded successfully to eBay Picture Services");
-      console.log("🖼️ Final EPS Image URL:", imageUrl);
-      console.log("⏰ Expiration Date:", expirationDate);
+      logger.info("Image uploaded successfully", { imageUrl });
 
       return res.status(201).json({
         success: true,
@@ -921,15 +890,12 @@ app.post("/api/ebay/upload-image", verifyApiKey, async (req, res) => {
         location: locationHeader,
       });
     } catch (mediaError) {
-      // Fallback to Inventory API if Media API fails (better sandbox support)
       if (
         mediaError.response?.status === 404 ||
         mediaError.response?.data?.errors?.[0]?.errorId === 2002 ||
         mediaError.code === "ENOTFOUND"
       ) {
-        console.log(
-          "⚠️ Media API not available, falling back to Inventory API..."
-        );
+        logger.warn("Media API not available, falling back to Inventory API");
 
         const inventoryBaseUrl = EBAY_CONFIG.useSandbox
           ? "https://api.sandbox.ebay.com"
@@ -949,7 +915,7 @@ app.post("/api/ebay/upload-image", verifyApiKey, async (req, res) => {
         );
 
         const imageUrl = inventoryResponse.data.imageUrl;
-        console.log("✅ Image uploaded via Inventory API fallback:", imageUrl);
+        logger.info("Image uploaded via Inventory API fallback", { imageUrl });
 
         return res.status(201).json({
           success: true,
@@ -961,10 +927,10 @@ app.post("/api/ebay/upload-image", verifyApiKey, async (req, res) => {
       throw mediaError;
     }
   } catch (error) {
-    console.error(
-      "❌ Image upload error:",
-      error.response?.data || error.message
-    );
+    logger.error("Image upload failed", {
+      error: error.message,
+      status: error.response?.status,
+    });
 
     const status = error.response?.status || 500;
     const errorData = error.response?.data;
@@ -986,37 +952,82 @@ app.post("/api/ebay/upload-image", verifyApiKey, async (req, res) => {
 // ERROR HANDLING
 // ═══════════════════════════════════════════════════════════════
 
-// Error handling middleware
 app.use((err, req, res, next) => {
-  console.error("Unhandled error:", err);
+  logger.error("Unhandled error", {
+    error: err.message,
+    stack: config.isDevelopment ? err.stack : undefined,
+    url: req.url,
+    method: req.method,
+  });
 
   res.status(500).json({
-    error:
-      process.env.NODE_ENV === "production"
-        ? "Internal server error"
-        : err.message,
+    error: config.isProduction ? "Internal server error" : err.message,
   });
 });
 
-// 404 handler
 app.use((req, res) => {
+  logger.warn("Route not found", { url: req.url, method: req.method });
   res.status(404).json({ error: "Not found" });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// GRACEFUL SHUTDOWN
+// ═══════════════════════════════════════════════════════════════
+
+let server;
+
+function gracefulShutdown(signal) {
+  logger.info(`${signal} received, starting graceful shutdown`);
+
+  if (server) {
+    server.close((err) => {
+      if (err) {
+        logger.error("Error during server shutdown", { error: err.message });
+        process.exit(1);
+      }
+
+      logger.info("HTTP server closed");
+      logger.info("Graceful shutdown complete");
+      process.exit(0);
+    });
+
+    setTimeout(() => {
+      logger.error("Forced shutdown after timeout");
+      process.exit(1);
+    }, 30000);
+  } else {
+    process.exit(0);
+  }
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+process.on("unhandledRejection", (reason, promise) => {
+  logger.error("Unhandled Promise Rejection", {
+    reason: reason?.message || reason,
+    stack: reason?.stack,
+  });
+});
+
+process.on("uncaughtException", (error) => {
+  logger.error("Uncaught Exception", {
+    error: error.message,
+    stack: error.stack,
+  });
+  gracefulShutdown("UNCAUGHT_EXCEPTION");
 });
 
 // ═══════════════════════════════════════════════════════════════
 // START SERVER
 // ═══════════════════════════════════════════════════════════════
 
-const PORT = process.env.PORT || 3000;
-
-// Get local IP for easy mobile testing
 const getLocalIP = () => {
   const os = require("os");
   const networkInterfaces = os.networkInterfaces();
 
   for (const interfaceName in networkInterfaces) {
     for (const iface of networkInterfaces[interfaceName]) {
-      // Skip internal and non-IPv4 addresses
       if (iface.family === "IPv4" && !iface.internal) {
         return iface.address;
       }
@@ -1025,14 +1036,15 @@ const getLocalIP = () => {
   return "localhost";
 };
 
-// Listen on all network interfaces (not just localhost)
-app.listen(PORT, "0.0.0.0", () => {
+server = app.listen(config.port, "0.0.0.0", () => {
   const localIP = getLocalIP();
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📱 Local access: http://localhost:${PORT}`);
-  console.log(`📱 Network access: http://${localIP}:${PORT}`);
-  console.log(`📦 Environment: ${process.env.NODE_ENV || "development"}`);
-  console.log(
-    `🔧 eBay Mode: ${EBAY_CONFIG.useSandbox ? "Sandbox" : "Production"}`
-  );
+  logger.info("Server started", {
+    port: config.port,
+    environment: config.nodeEnv,
+    ebayMode: EBAY_CONFIG.useSandbox ? "Sandbox" : "Production",
+    localUrl: `http://localhost:${config.port}`,
+    networkUrl: `http://${localIP}:${config.port}`,
+  });
 });
+
+module.exports = app;
