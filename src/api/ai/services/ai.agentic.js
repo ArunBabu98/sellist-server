@@ -77,8 +77,9 @@ class AIAgentic {
     const model = this.genAI.getGenerativeModel({
       model: this.filterModel,
       generationConfig: {
-        maxOutputTokens: 1024,
-        temperature: 0.3,
+        maxOutputTokens: 2048,
+        temperature: 0.2,
+        responseMimeType: "application/json",
       },
     });
 

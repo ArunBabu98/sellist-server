@@ -103,34 +103,11 @@ class GeminiService {
         };
       });
 
-      // 2️⃣ Phase 0 — Visual Image Role + Quality Check
-      const visualAnalysis = await this._retryWithBackoff(
-        () => this.aiAgentic.visualImageID(buffers, correlationId),
-        "visualImageID",
-        correlationId
-      );
-
-      // 3️⃣ Select ONLY recommended images
-      const selectedBuffers = buffers.filter((b) =>
-        visualAnalysis.summary.recommendedForAI.includes(b.index)
-      );
-
-      // 4️⃣ Safety fallback
-      if (selectedBuffers.length === 0) {
-        logger.warn(
-          "No suitable images after visual analysis, falling back to first image",
-          {
-            correlationId,
-          }
-        );
-        selectedBuffers.push(buffers[0]);
-      }
-
       // 5️⃣ Continue with product intelligence
       return await this._retryWithBackoff(
         () =>
           this._analyzeMultipleImagesWithContext(
-            selectedBuffers,
+            buffers,
             {
               ...options,
               visualAnalysis, // pass forward for transparency/UI

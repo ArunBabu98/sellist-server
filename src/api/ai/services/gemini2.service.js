@@ -33,7 +33,8 @@ class GeminiService {
   // ✅ FIX: Getter for lazy loading
   get aiAgentic() {
     if (!this._aiAgentic) {
-      this._aiAgentic = require("./ai.agentic");
+      // this._aiAgentic = require("./ai.agentic");
+      this._aiAgentic = require("./ai.agentic2");
     }
     return this._aiAgentic;
   }
@@ -42,6 +43,244 @@ class GeminiService {
   // PUBLIC API
   // ===========================================================================
 
+  // async analyzeMultipleImages(images, options = {}) {
+  //   const startTime = Date.now();
+  //   const correlationId = this._correlationId();
+
+  //   logger.info("Starting multi-image analysis", {
+  //     correlationId,
+  //     imageCount: images?.length,
+  //   });
+
+  //   if (!Array.isArray(images) || images.length === 0) {
+  //     throw new Error("Images array must not be empty");
+  //   }
+
+  //   if (images.length > this.MAX_IMAGES_PER_REQUEST) {
+  //     throw new Error(
+  //       `Too many images. Maximum ${this.MAX_IMAGES_PER_REQUEST} allowed`
+  //     );
+  //   }
+
+  //   // Validate and prepare buffers
+  //   const buffers = [];
+  //   for (let i = 0; i < images.length; i++) {
+  //     const img = images[i];
+  //     this._validateImage(img.base64, img.mimeType);
+
+  //     const buffer = Buffer.from(img.base64, "base64");
+  //     const sizeMB = (buffer.length / (1024 * 1024)).toFixed(2);
+
+  //     logger.debug("Image validation passed", {
+  //       mimeType: img.mimeType || "image/jpeg",
+  //       sizeMB,
+  //     });
+
+  //     buffers.push({
+  //       index: i,
+  //       mimeType: img.mimeType || "image/jpeg",
+  //       buffer,
+  //     });
+  //   }
+
+  //   // =========================================================================
+  //   // PHASE 0: Image Quality & Role Assignment
+  //   // =========================================================================
+  //   // let visualAnalysis = null;
+  //   let selectedBuffers = buffers;
+
+  //   // try {
+  //   //   visualAnalysis = await this._retryWithBackoff(
+  //   //     () => this.aiAgentic.visualImageID(buffers, correlationId),
+  //   //     "visualImageID",
+  //   //     correlationId
+  //   //   );
+
+  //   //   selectedBuffers = buffers.filter((b) =>
+  //   //     visualAnalysis.summary.recommendedForAI.includes(b.index)
+  //   //   );
+
+  //   //   if (selectedBuffers.length === 0) {
+  //   //     logger.warn("Phase 0 rejected all images, using fallback", {
+  //   //       correlationId,
+  //   //     });
+  //   //     selectedBuffers = [buffers[0]];
+  //   //   }
+
+  //   //   logger.info("Phase 0 complete", {
+  //   //     correlationId,
+  //   //     usableImages: visualAnalysis.summary.usableImages,
+  //   //     selectedCount: selectedBuffers.length,
+  //   //   });
+  //   // } catch (err) {
+  //   //   logger.error("Phase 0 failed, continuing with all images", {
+  //   //     correlationId,
+  //   //     error: err.message,
+  //   //   });
+  //   //   selectedBuffers = buffers;
+  //   // }
+
+  //   // =========================================================================
+  //   // PHASE 1: Visual Grounding - Product ID + Compliance
+  //   // =========================================================================
+  //   logger.info("Starting Phase 1: Visual Grounding", { correlationId });
+
+  //   const groundingResult = await this._retryWithBackoff(
+  //     () => this.aiAgentic.visualGrounding(selectedBuffers, correlationId),
+  //     "visualGrounding",
+  //     correlationId
+  //   );
+
+  //   logger.info("Phase 1 complete", {
+  //     correlationId,
+  //     compliant: groundingResult.compliance.isEbayCompliant,
+  //     confidence: groundingResult.productIdentification.confidence,
+  //   });
+
+  //   // ❌ REJECT: eBay policy violation
+  //   if (!groundingResult.compliance.isEbayCompliant) {
+  //     logger.warn("Product rejected: eBay policy violation", {
+  //       correlationId,
+  //       violationCategory: groundingResult.compliance.violationCategory,
+  //       reason: groundingResult.compliance.reason,
+  //     });
+
+  //     return {
+  //       success: false,
+  //       rejected: true,
+  //       reason: "EBAY_POLICY_VIOLATION",
+  //       details: groundingResult,
+  //       metadata: {
+  //         correlationId,
+  //         processingTime: Date.now() - startTime,
+  //       },
+  //     };
+  //   }
+
+  //   // ⚠️ REQUIRE REVIEW: Low confidence or restricted
+  //   if (groundingResult.recommendations.reviewNeeded) {
+  //     logger.info("Product requires manual review", {
+  //       correlationId,
+  //       guidance: groundingResult.recommendations.guidance,
+  //     });
+
+  //     return {
+  //       success: false,
+  //       rejected: false,
+  //       requiresReview: true,
+  //       reason: "MANUAL_REVIEW_REQUIRED",
+  //       details: groundingResult,
+  //       metadata: {
+  //         correlationId,
+  //         processingTime: Date.now() - startTime,
+  //       },
+  //     };
+  //   }
+
+  //   // =========================================================================
+  //   // PHASE 2: Physical Attributes - Weight, Dimensions, Condition
+  //   // =========================================================================
+  //   logger.info("Starting Phase 2: Physical Attributes", { correlationId });
+
+  //   const physicalAttributes = await this._retryWithBackoff(
+  //     () =>
+  //       this.aiAgentic.extractPhysicalAttributes(
+  //         selectedBuffers,
+  //         groundingResult.productIdentification,
+  //         correlationId
+  //       ),
+  //     "extractPhysicalAttributes",
+  //     correlationId
+  //   );
+
+  //   logger.info("Phase 2 complete", {
+  //     correlationId,
+  //     weight: physicalAttributes.weight?.estimatedLbs,
+  //     condition: physicalAttributes.condition?.grade,
+  //   });
+
+  //   // =========================================================================
+  //   // PHASE 3: Pricing Strategy & Shipping
+  //   // =========================================================================
+  //   logger.info("Starting Phase 3: Pricing Strategy", { correlationId });
+
+  //   const pricingStrategy = await this._retryWithBackoff(
+  //     () =>
+  //       this.aiAgentic.analyzePricingStrategy(
+  //         groundingResult.productIdentification,
+  //         physicalAttributes,
+  //         options.marketData || [],
+  //         options.sellerConfig || {},
+  //         correlationId
+  //       ),
+  //     "analyzePricingStrategy",
+  //     correlationId
+  //   );
+
+  //   logger.info("Phase 3 complete", {
+  //     correlationId,
+  //     price: pricingStrategy.pricing?.suggestedPrice,
+  //     format: pricingStrategy.pricing?.strategyRecommendation?.listingFormat,
+  //   });
+
+  //   // =========================================================================
+  //   // PHASE 4: Listing Content - Title, Description, SEO
+  //   // =========================================================================
+  //   logger.info("Starting Phase 4: Listing Content", { correlationId });
+
+  //   const listingContent = await this._retryWithBackoff(
+  //     () =>
+  //       this.aiAgentic.generateListingContent(
+  //         groundingResult.productIdentification,
+  //         physicalAttributes,
+  //         pricingStrategy,
+  //         correlationId
+  //       ),
+  //     "generateListingContent",
+  //     correlationId
+  //   );
+
+  //   logger.info("Phase 4 complete", {
+  //     correlationId,
+  //     titleLength: listingContent.title?.length,
+  //     keywordsCount: listingContent.seoOptimization?.primaryKeywords?.length,
+  //   });
+
+  //   // =========================================================================
+  //   // FINAL ASSEMBLY - Map to exact payload structure
+  //   // =========================================================================
+  //   const processingTime = Date.now() - startTime;
+
+  //   const finalPayload = this._mapToListingPayload(
+  //     {
+  //       productIdentification: groundingResult.productIdentification,
+  //       title: listingContent.title,
+  //       subtitle: listingContent.subtitle,
+  //       description: listingContent.description,
+  //       condition: physicalAttributes.condition,
+  //       weight: physicalAttributes.weight,
+  //       dimensions: physicalAttributes.dimensions,
+  //       pricing: pricingStrategy.pricing,
+  //       shipping: pricingStrategy.shipping,
+  //       itemSpecifics: listingContent.itemSpecifics,
+  //       seoOptimization: listingContent.seoOptimization,
+  //       listingRecommendations: listingContent.listingRecommendations,
+  //       qualityChecks: physicalAttributes.qualityChecks,
+  //       complianceFlags: listingContent.complianceFlags,
+  //     },
+  //     { processingTime }
+  //   );
+
+  //   logger.info("Multi-image analysis complete", {
+  //     correlationId,
+  //     processingTime,
+  //     brand: finalPayload.productIdentification.brand,
+  //     category: finalPayload.productIdentification.category,
+  //     price: finalPayload.pricing.suggestedPrice,
+  //   });
+
+  //   return finalPayload;
+  // }
   async analyzeMultipleImages(images, options = {}) {
     const startTime = Date.now();
     const correlationId = this._correlationId();
@@ -82,203 +321,53 @@ class GeminiService {
       });
     }
 
-    // =========================================================================
-    // PHASE 0: Image Quality & Role Assignment
-    // =========================================================================
-    // let visualAnalysis = null;
-    let selectedBuffers = buffers;
-
-    // try {
-    //   visualAnalysis = await this._retryWithBackoff(
-    //     () => this.aiAgentic.visualImageID(buffers, correlationId),
-    //     "visualImageID",
-    //     correlationId
-    //   );
-
-    //   selectedBuffers = buffers.filter((b) =>
-    //     visualAnalysis.summary.recommendedForAI.includes(b.index)
-    //   );
-
-    //   if (selectedBuffers.length === 0) {
-    //     logger.warn("Phase 0 rejected all images, using fallback", {
-    //       correlationId,
-    //     });
-    //     selectedBuffers = [buffers[0]];
-    //   }
-
-    //   logger.info("Phase 0 complete", {
-    //     correlationId,
-    //     usableImages: visualAnalysis.summary.usableImages,
-    //     selectedCount: selectedBuffers.length,
-    //   });
-    // } catch (err) {
-    //   logger.error("Phase 0 failed, continuing with all images", {
-    //     correlationId,
-    //     error: err.message,
-    //   });
-    //   selectedBuffers = buffers;
-    // }
-
-    // =========================================================================
-    // PHASE 1: Visual Grounding - Product ID + Compliance
-    // =========================================================================
-    logger.info("Starting Phase 1: Visual Grounding", { correlationId });
-
-    const groundingResult = await this._retryWithBackoff(
-      () => this.aiAgentic.visualGrounding(selectedBuffers, correlationId),
-      "visualGrounding",
+    // Single high-level agentic call (2 internal Gemini calls)
+    const listingPayload = await this._retryWithBackoff(
+      () =>
+        this.aiAgentic.generateCompleteListing(
+          buffers,
+          {
+            marketData: options.marketData || [],
+            sellerConfig: options.sellerConfig || {},
+            userProvidedCondition: options.userProvidedCondition || null,
+          },
+          correlationId
+        ),
+      "generateCompleteListing",
       correlationId
     );
 
-    logger.info("Phase 1 complete", {
-      correlationId,
-      compliant: groundingResult.compliance.isEbayCompliant,
-      confidence: groundingResult.productIdentification.confidence,
-    });
-
-    // ❌ REJECT: eBay policy violation
-    if (!groundingResult.compliance.isEbayCompliant) {
-      logger.warn("Product rejected: eBay policy violation", {
+    // If agentic flow decided to reject / require review, just return that object
+    if (listingPayload.rejected || listingPayload.requiresReview) {
+      logger.info("Multi-image analysis completed with non-success state", {
         correlationId,
-        violationCategory: groundingResult.compliance.violationCategory,
-        reason: groundingResult.compliance.reason,
+        rejected: !!listingPayload.rejected,
+        requiresReview: !!listingPayload.requiresReview,
+        reason: listingPayload.reason,
+        processingTime: listingPayload.metadata?.processingTime,
       });
-
-      return {
-        success: false,
-        rejected: true,
-        reason: "EBAY_POLICY_VIOLATION",
-        details: groundingResult,
-        metadata: {
-          correlationId,
-          processingTime: Date.now() - startTime,
-        },
-      };
+      return listingPayload;
     }
 
-    // ⚠️ REQUIRE REVIEW: Low confidence or restricted
-    if (groundingResult.recommendations.reviewNeeded) {
-      logger.info("Product requires manual review", {
-        correlationId,
-        guidance: groundingResult.recommendations.guidance,
-      });
+    // Ensure processingTime is set if not already
+    const processingTime =
+      listingPayload.metadata?.processingTime ?? Date.now() - startTime;
 
-      return {
-        success: false,
-        rejected: false,
-        requiresReview: true,
-        reason: "MANUAL_REVIEW_REQUIRED",
-        details: groundingResult,
-        metadata: {
-          correlationId,
-          processingTime: Date.now() - startTime,
-        },
-      };
-    }
-
-    // =========================================================================
-    // PHASE 2: Physical Attributes - Weight, Dimensions, Condition
-    // =========================================================================
-    logger.info("Starting Phase 2: Physical Attributes", { correlationId });
-
-    const physicalAttributes = await this._retryWithBackoff(
-      () =>
-        this.aiAgentic.extractPhysicalAttributes(
-          selectedBuffers,
-          groundingResult.productIdentification,
-          correlationId
-        ),
-      "extractPhysicalAttributes",
-      correlationId
-    );
-
-    logger.info("Phase 2 complete", {
+    listingPayload.metadata = {
+      ...(listingPayload.metadata || {}),
       correlationId,
-      weight: physicalAttributes.weight?.estimatedLbs,
-      condition: physicalAttributes.condition?.grade,
-    });
-
-    // =========================================================================
-    // PHASE 3: Pricing Strategy & Shipping
-    // =========================================================================
-    logger.info("Starting Phase 3: Pricing Strategy", { correlationId });
-
-    const pricingStrategy = await this._retryWithBackoff(
-      () =>
-        this.aiAgentic.analyzePricingStrategy(
-          groundingResult.productIdentification,
-          physicalAttributes,
-          options.marketData || [],
-          options.sellerConfig || {},
-          correlationId
-        ),
-      "analyzePricingStrategy",
-      correlationId
-    );
-
-    logger.info("Phase 3 complete", {
-      correlationId,
-      price: pricingStrategy.pricing?.suggestedPrice,
-      format: pricingStrategy.pricing?.strategyRecommendation?.listingFormat,
-    });
-
-    // =========================================================================
-    // PHASE 4: Listing Content - Title, Description, SEO
-    // =========================================================================
-    logger.info("Starting Phase 4: Listing Content", { correlationId });
-
-    const listingContent = await this._retryWithBackoff(
-      () =>
-        this.aiAgentic.generateListingContent(
-          groundingResult.productIdentification,
-          physicalAttributes,
-          pricingStrategy,
-          correlationId
-        ),
-      "generateListingContent",
-      correlationId
-    );
-
-    logger.info("Phase 4 complete", {
-      correlationId,
-      titleLength: listingContent.title?.length,
-      keywordsCount: listingContent.seoOptimization?.primaryKeywords?.length,
-    });
-
-    // =========================================================================
-    // FINAL ASSEMBLY - Map to exact payload structure
-    // =========================================================================
-    const processingTime = Date.now() - startTime;
-
-    const finalPayload = this._mapToListingPayload(
-      {
-        productIdentification: groundingResult.productIdentification,
-        title: listingContent.title,
-        subtitle: listingContent.subtitle,
-        description: listingContent.description,
-        condition: physicalAttributes.condition,
-        weight: physicalAttributes.weight,
-        dimensions: physicalAttributes.dimensions,
-        pricing: pricingStrategy.pricing,
-        shipping: pricingStrategy.shipping,
-        itemSpecifics: listingContent.itemSpecifics,
-        seoOptimization: listingContent.seoOptimization,
-        listingRecommendations: listingContent.listingRecommendations,
-        qualityChecks: physicalAttributes.qualityChecks,
-        complianceFlags: listingContent.complianceFlags,
-      },
-      { processingTime }
-    );
+      processingTime,
+    };
 
     logger.info("Multi-image analysis complete", {
       correlationId,
       processingTime,
-      brand: finalPayload.productIdentification.brand,
-      category: finalPayload.productIdentification.category,
-      price: finalPayload.pricing.suggestedPrice,
+      brand: listingPayload.productIdentification?.brand,
+      category: listingPayload.productIdentification?.category,
+      price: listingPayload.pricing?.suggestedPrice,
     });
 
-    return finalPayload;
+    return listingPayload;
   }
 
   // ===========================================================================
