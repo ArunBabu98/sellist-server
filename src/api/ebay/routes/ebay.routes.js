@@ -1,5 +1,6 @@
 const express = require("express");
 const authController = require("../controllers/auth.controller");
+const draftingController = require("../controllers/drafting.controller");
 const listingController = require("../controllers/listing.controller");
 const taxonomyController = require("../controllers/taxonomy.controller");
 const mediaController = require("../controllers/media.controller");
@@ -29,6 +30,15 @@ router.get(
   taxonomyController.getCategoryAspects
 );
 
+// Drafting
+router.post(
+  "/draft/batch",
+  verifyBearerToken,
+  draftingController.batchCreateDrafts
+);
+
+router.get("/drafts", verifyBearerToken, draftingController.getDraftOffers);
+
 // Listing routes
 router.post(
   "/publish-listing",
@@ -40,15 +50,22 @@ router.post(
 router.post("/upload-image", verifyBearerToken, mediaController.uploadImage);
 
 // Setup routes
+// Setup routes
 router.post(
   "/opt-in-policies",
   verifyBearerToken,
   setupController.optInPolicies
 );
+
 router.post(
   "/create-location",
   verifyBearerToken,
   setupController.createLocation
 );
+
+// ✅ NEW
+router.get("/policies", verifyBearerToken, setupController.getPolicies);
+
+router.get("/locations", verifyBearerToken, setupController.getLocations);
 
 module.exports = router;
