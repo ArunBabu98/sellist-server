@@ -142,16 +142,40 @@ class AuthService {
     };
   }
 
-  async getUserProfile(accessToken) {
-    const response = await axios.get(EBAY_CONFIG.identityUrl, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 30000,
-    });
+  // async getUserProfile(accessToken) {
+  //   const response = await axios.get(EBAY_CONFIG.identityUrl, {
+  //     headers: {
+  //       Authorization: `Bearer ${accessToken}`,
+  //       "Content-Type": "application/json",
+  //     },
+  //     timeout: 30000,
+  //   });
 
-    return response.data;
+  //   return response.data;
+  // }
+  async getUserProfile(accessToken) {
+    const maxAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await axios.get(EBAY_CONFIG.identityUrl, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          timeout: 10000,
+        });
+        return response.data;
+      } catch (err) {
+        const status = err.response?.status;
+
+        // Retry ONLY for transient eBay identity failures
+        if ((status === 503 || status === 403) && attempt < maxAttempts) {
+          logger.warn(`Identity API not ready (attempt ${attempt}), retrying…`);
+          await new Promise((r) => setTimeout(r, attempt * 1000));
+          continue;
+        }
+
+        throw err;
+      }
+    }
   }
 
   async getApplicationToken() {

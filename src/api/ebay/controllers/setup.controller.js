@@ -6,6 +6,31 @@ const {
 const logger = require("../../../config/logger.config");
 
 class SetupController {
+  async ensurePolicies(req, res) {
+    try {
+      const policies = await setupService.ensureDefaultPolicies(
+        req.accessToken
+      );
+
+      successResponse(res, policies, "Policies ensured successfully");
+    } catch (error) {
+      logger.error("Failed to ensure policies", {
+        message: error.message,
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data,
+        details: error.details,
+      });
+
+      errorResponse(
+        res,
+        "Seller account not ready for business policies",
+        error.response?.status || 409,
+        error.details || error.response?.data || error.message
+      );
+    }
+  }
+
   async optInPolicies(req, res) {
     try {
       await setupService.optInPolicies(req.accessToken);

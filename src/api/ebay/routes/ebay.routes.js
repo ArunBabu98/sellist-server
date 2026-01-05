@@ -68,4 +68,10 @@ router.get("/policies", verifyBearerToken, setupController.getPolicies);
 
 router.get("/locations", verifyBearerToken, setupController.getLocations);
 
+router.post(
+  "/ensure-policies",
+  verifyBearerToken,
+  setupController.ensurePolicies
+);
+
 module.exports = router;

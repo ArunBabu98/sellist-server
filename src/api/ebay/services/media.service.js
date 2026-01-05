@@ -81,6 +81,12 @@ class MediaService {
         location: locationHeader,
       };
     } catch (mediaError) {
+      if (mediaError.response?.status === 503) {
+        logger.warn("eBay media 503, retrying image upload");
+        await new Promise((r) => setTimeout(r, 800));
+        return this.uploadImage(accessToken, imageBuffer, filename);
+      }
+
       if (
         mediaError.response?.status === 404 ||
         mediaError.response?.data?.errors?.[0]?.errorId === 2002 ||
