@@ -142,16 +142,91 @@ class AuthService {
     };
   }
 
-  async getUserProfile(accessToken) {
-    const response = await axios.get(EBAY_CONFIG.identityUrl, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 30000,
+  isRetryableIdentityError(error) {
+    const status = error.response?.status;
+
+    // Network issues
+    if (!status && error.code) return true;
+
+    // Transient eBay issues
+    if ([429, 500, 502, 503, 504].includes(status)) return true;
+
+    return false;
+  }
+
+  backoffDelay(attempt) {
+    const base = Math.min(1000 * Math.pow(2, attempt), 15000); // cap at 15s
+    const jitter = Math.random() * 500;
+    return base + jitter;
+  }
+
+  async getUserProfile(accessToken, options = {}) {
+    const {
+      maxAttempts = 5,
+      context = "login", // login | refresh | background
+    } = options;
+
+    let attempt = 0;
+    let lastError = null;
+
+    while (attempt < maxAttempts) {
+      try {
+        const response = await axios.get(EBAY_CONFIG.identityUrl, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          timeout: 10000,
+        });
+
+        if (!response.data?.userId) {
+          throw new Error("Identity response missing userId");
+        }
+
+        logger.info("✅ eBay identity verified", {
+          ebayUserId: response.data.userId,
+          attempt: attempt + 1,
+          context,
+        });
+
+        return response.data;
+      } catch (error) {
+        lastError = error;
+
+        const status = error.response?.status;
+
+        logger.warn("⚠️ Identity fetch failed", {
+          attempt: attempt + 1,
+          maxAttempts,
+          status,
+          code: error.code,
+          context,
+          message: error.message,
+        });
+
+        // ✅ FIXED
+        if (!this.isRetryableIdentityError(error)) {
+          break;
+        }
+
+        if (context === "background" && attempt >= 1) {
+          break;
+        }
+
+        const delay = this.backoffDelay(attempt); // ✅ FIXED
+        await new Promise((r) => setTimeout(r, delay));
+        attempt++;
+      }
+    }
+
+    logger.error("❌ Identity verification failed after retries", {
+      attempts: attempt,
+      context,
+      lastStatus: lastError?.response?.status,
+      lastMessage: lastError?.message,
     });
 
-    return response.data;
+    throw lastError;
   }
 
   async getApplicationToken() {
