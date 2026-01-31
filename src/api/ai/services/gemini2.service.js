@@ -28,6 +28,11 @@ class GeminiService {
       "image/png",
       "image/webp",
     ];
+
+    this.tokenUsage = {
+      total: 0,
+      byOperation: {},
+    };
   }
 
   // ✅ FIX: Getter for lazy loading
@@ -38,249 +43,118 @@ class GeminiService {
     }
     return this._aiAgentic;
   }
+  _logTokenUsage(operationName, response, correlationId) {
+    try {
+      const usage = response?.usageMetadata;
 
-  // ===========================================================================
-  // PUBLIC API
-  // ===========================================================================
+      if (!usage) {
+        logger.warn("No token usage metadata available", {
+          correlationId,
+          operation: operationName,
+        });
+        return null;
+      }
 
-  // async analyzeMultipleImages(images, options = {}) {
-  //   const startTime = Date.now();
-  //   const correlationId = this._correlationId();
+      const tokenData = {
+        promptTokens: usage.promptTokenCount || 0,
+        candidatesTokens: usage.candidatesTokenCount || 0,
+        totalTokens: usage.totalTokenCount || 0,
+        cachedContentTokens: usage.cachedContentTokenCount || 0,
+      };
 
-  //   logger.info("Starting multi-image analysis", {
-  //     correlationId,
-  //     imageCount: images?.length,
-  //   });
+      // Update totals
+      this.tokenUsage.total += tokenData.totalTokens;
 
-  //   if (!Array.isArray(images) || images.length === 0) {
-  //     throw new Error("Images array must not be empty");
-  //   }
+      if (!this.tokenUsage.byOperation[operationName]) {
+        this.tokenUsage.byOperation[operationName] = {
+          calls: 0,
+          totalTokens: 0,
+          promptTokens: 0,
+          candidatesTokens: 0,
+        };
+      }
 
-  //   if (images.length > this.MAX_IMAGES_PER_REQUEST) {
-  //     throw new Error(
-  //       `Too many images. Maximum ${this.MAX_IMAGES_PER_REQUEST} allowed`
-  //     );
-  //   }
+      this.tokenUsage.byOperation[operationName].calls += 1;
+      this.tokenUsage.byOperation[operationName].totalTokens +=
+        tokenData.totalTokens;
+      this.tokenUsage.byOperation[operationName].promptTokens +=
+        tokenData.promptTokens;
+      this.tokenUsage.byOperation[operationName].candidatesTokens +=
+        tokenData.candidatesTokens;
 
-  //   // Validate and prepare buffers
-  //   const buffers = [];
-  //   for (let i = 0; i < images.length; i++) {
-  //     const img = images[i];
-  //     this._validateImage(img.base64, img.mimeType);
+      logger.info("Gemini API token usage", {
+        correlationId,
+        operation: operationName,
+        model: this.modelName,
+        tokens: tokenData,
+        costEstimate: this._estimateCost(tokenData),
+      });
 
-  //     const buffer = Buffer.from(img.base64, "base64");
-  //     const sizeMB = (buffer.length / (1024 * 1024)).toFixed(2);
+      return tokenData;
+    } catch (err) {
+      logger.error("Failed to log token usage", {
+        correlationId,
+        operation: operationName,
+        error: err.message,
+      });
+      return null;
+    }
+  }
 
-  //     logger.debug("Image validation passed", {
-  //       mimeType: img.mimeType || "image/jpeg",
-  //       sizeMB,
-  //     });
+  // ✅ NEW: Estimate cost based on token usage
+  _estimateCost(tokenData) {
+    // Gemini 2.5 Flash pricing (as of Jan 2026)
+    // Input: $0.00001875 per 1K tokens
+    // Output: $0.000075 per 1K tokens
+    // Cached: $0.000001875 per 1K tokens (90% discount)
 
-  //     buffers.push({
-  //       index: i,
-  //       mimeType: img.mimeType || "image/jpeg",
-  //       buffer,
-  //     });
-  //   }
+    const inputCost = (tokenData.promptTokens / 1000) * 0.00001875;
+    const outputCost = (tokenData.candidatesTokens / 1000) * 0.000075;
+    const cachedCost = (tokenData.cachedContentTokens / 1000) * 0.000001875;
 
-  //   // =========================================================================
-  //   // PHASE 0: Image Quality & Role Assignment
-  //   // =========================================================================
-  //   // let visualAnalysis = null;
-  //   let selectedBuffers = buffers;
+    const total = inputCost + outputCost + cachedCost;
 
-  //   // try {
-  //   //   visualAnalysis = await this._retryWithBackoff(
-  //   //     () => this.aiAgentic.visualImageID(buffers, correlationId),
-  //   //     "visualImageID",
-  //   //     correlationId
-  //   //   );
+    return {
+      input: `$${inputCost.toFixed(6)}`,
+      output: `$${outputCost.toFixed(6)}`,
+      cached: `$${cachedCost.toFixed(6)}`,
+      total: `$${total.toFixed(6)}`,
+    };
+  }
 
-  //   //   selectedBuffers = buffers.filter((b) =>
-  //   //     visualAnalysis.summary.recommendedForAI.includes(b.index)
-  //   //   );
+  // ✅ NEW: Get aggregated token usage stats
+  getTokenUsageStats() {
+    return {
+      totalTokensUsed: this.tokenUsage.total,
+      operationBreakdown: this.tokenUsage.byOperation,
+      estimatedTotalCost: this._estimateTotalCost(),
+    };
+  }
 
-  //   //   if (selectedBuffers.length === 0) {
-  //   //     logger.warn("Phase 0 rejected all images, using fallback", {
-  //   //       correlationId,
-  //   //     });
-  //   //     selectedBuffers = [buffers[0]];
-  //   //   }
+  _estimateTotalCost() {
+    let totalCost = 0;
 
-  //   //   logger.info("Phase 0 complete", {
-  //   //     correlationId,
-  //   //     usableImages: visualAnalysis.summary.usableImages,
-  //   //     selectedCount: selectedBuffers.length,
-  //   //   });
-  //   // } catch (err) {
-  //   //   logger.error("Phase 0 failed, continuing with all images", {
-  //   //     correlationId,
-  //   //     error: err.message,
-  //   //   });
-  //   //   selectedBuffers = buffers;
-  //   // }
+    Object.values(this.tokenUsage.byOperation).forEach((op) => {
+      // Rough estimate assuming 80/20 input/output split
+      const inputTokens = op.promptTokens;
+      const outputTokens = op.candidatesTokens;
 
-  //   // =========================================================================
-  //   // PHASE 1: Visual Grounding - Product ID + Compliance
-  //   // =========================================================================
-  //   logger.info("Starting Phase 1: Visual Grounding", { correlationId });
+      totalCost += (inputTokens / 1000) * 0.00001875;
+      totalCost += (outputTokens / 1000) * 0.000075;
+    });
 
-  //   const groundingResult = await this._retryWithBackoff(
-  //     () => this.aiAgentic.visualGrounding(selectedBuffers, correlationId),
-  //     "visualGrounding",
-  //     correlationId
-  //   );
+    return `$${totalCost.toFixed(6)}`;
+  }
 
-  //   logger.info("Phase 1 complete", {
-  //     correlationId,
-  //     compliant: groundingResult.compliance.isEbayCompliant,
-  //     confidence: groundingResult.productIdentification.confidence,
-  //   });
+  // ✅ NEW: Reset token usage stats (useful for testing)
+  resetTokenUsage() {
+    this.tokenUsage = {
+      total: 0,
+      byOperation: {},
+    };
+    logger.info("Token usage stats reset");
+  }
 
-  //   // ❌ REJECT: eBay policy violation
-  //   if (!groundingResult.compliance.isEbayCompliant) {
-  //     logger.warn("Product rejected: eBay policy violation", {
-  //       correlationId,
-  //       violationCategory: groundingResult.compliance.violationCategory,
-  //       reason: groundingResult.compliance.reason,
-  //     });
-
-  //     return {
-  //       success: false,
-  //       rejected: true,
-  //       reason: "EBAY_POLICY_VIOLATION",
-  //       details: groundingResult,
-  //       metadata: {
-  //         correlationId,
-  //         processingTime: Date.now() - startTime,
-  //       },
-  //     };
-  //   }
-
-  //   // ⚠️ REQUIRE REVIEW: Low confidence or restricted
-  //   if (groundingResult.recommendations.reviewNeeded) {
-  //     logger.info("Product requires manual review", {
-  //       correlationId,
-  //       guidance: groundingResult.recommendations.guidance,
-  //     });
-
-  //     return {
-  //       success: false,
-  //       rejected: false,
-  //       requiresReview: true,
-  //       reason: "MANUAL_REVIEW_REQUIRED",
-  //       details: groundingResult,
-  //       metadata: {
-  //         correlationId,
-  //         processingTime: Date.now() - startTime,
-  //       },
-  //     };
-  //   }
-
-  //   // =========================================================================
-  //   // PHASE 2: Physical Attributes - Weight, Dimensions, Condition
-  //   // =========================================================================
-  //   logger.info("Starting Phase 2: Physical Attributes", { correlationId });
-
-  //   const physicalAttributes = await this._retryWithBackoff(
-  //     () =>
-  //       this.aiAgentic.extractPhysicalAttributes(
-  //         selectedBuffers,
-  //         groundingResult.productIdentification,
-  //         correlationId
-  //       ),
-  //     "extractPhysicalAttributes",
-  //     correlationId
-  //   );
-
-  //   logger.info("Phase 2 complete", {
-  //     correlationId,
-  //     weight: physicalAttributes.weight?.estimatedLbs,
-  //     condition: physicalAttributes.condition?.grade,
-  //   });
-
-  //   // =========================================================================
-  //   // PHASE 3: Pricing Strategy & Shipping
-  //   // =========================================================================
-  //   logger.info("Starting Phase 3: Pricing Strategy", { correlationId });
-
-  //   const pricingStrategy = await this._retryWithBackoff(
-  //     () =>
-  //       this.aiAgentic.analyzePricingStrategy(
-  //         groundingResult.productIdentification,
-  //         physicalAttributes,
-  //         options.marketData || [],
-  //         options.sellerConfig || {},
-  //         correlationId
-  //       ),
-  //     "analyzePricingStrategy",
-  //     correlationId
-  //   );
-
-  //   logger.info("Phase 3 complete", {
-  //     correlationId,
-  //     price: pricingStrategy.pricing?.suggestedPrice,
-  //     format: pricingStrategy.pricing?.strategyRecommendation?.listingFormat,
-  //   });
-
-  //   // =========================================================================
-  //   // PHASE 4: Listing Content - Title, Description, SEO
-  //   // =========================================================================
-  //   logger.info("Starting Phase 4: Listing Content", { correlationId });
-
-  //   const listingContent = await this._retryWithBackoff(
-  //     () =>
-  //       this.aiAgentic.generateListingContent(
-  //         groundingResult.productIdentification,
-  //         physicalAttributes,
-  //         pricingStrategy,
-  //         correlationId
-  //       ),
-  //     "generateListingContent",
-  //     correlationId
-  //   );
-
-  //   logger.info("Phase 4 complete", {
-  //     correlationId,
-  //     titleLength: listingContent.title?.length,
-  //     keywordsCount: listingContent.seoOptimization?.primaryKeywords?.length,
-  //   });
-
-  //   // =========================================================================
-  //   // FINAL ASSEMBLY - Map to exact payload structure
-  //   // =========================================================================
-  //   const processingTime = Date.now() - startTime;
-
-  //   const finalPayload = this._mapToListingPayload(
-  //     {
-  //       productIdentification: groundingResult.productIdentification,
-  //       title: listingContent.title,
-  //       subtitle: listingContent.subtitle,
-  //       description: listingContent.description,
-  //       condition: physicalAttributes.condition,
-  //       weight: physicalAttributes.weight,
-  //       dimensions: physicalAttributes.dimensions,
-  //       pricing: pricingStrategy.pricing,
-  //       shipping: pricingStrategy.shipping,
-  //       itemSpecifics: listingContent.itemSpecifics,
-  //       seoOptimization: listingContent.seoOptimization,
-  //       listingRecommendations: listingContent.listingRecommendations,
-  //       qualityChecks: physicalAttributes.qualityChecks,
-  //       complianceFlags: listingContent.complianceFlags,
-  //     },
-  //     { processingTime }
-  //   );
-
-  //   logger.info("Multi-image analysis complete", {
-  //     correlationId,
-  //     processingTime,
-  //     brand: finalPayload.productIdentification.brand,
-  //     category: finalPayload.productIdentification.category,
-  //     price: finalPayload.pricing.suggestedPrice,
-  //   });
-
-  //   return finalPayload;
-  // }
   async analyzeMultipleImages(images, options = {}) {
     const startTime = Date.now();
     const correlationId = this._correlationId();
@@ -296,7 +170,7 @@ class GeminiService {
 
     if (images.length > this.MAX_IMAGES_PER_REQUEST) {
       throw new Error(
-        `Too many images. Maximum ${this.MAX_IMAGES_PER_REQUEST} allowed`
+        `Too many images. Maximum ${this.MAX_IMAGES_PER_REQUEST} allowed`,
       );
     }
 
@@ -331,10 +205,10 @@ class GeminiService {
             sellerConfig: options.sellerConfig || {},
             userProvidedCondition: options.userProvidedCondition || null,
           },
-          correlationId
+          correlationId,
         ),
       "generateCompleteListing",
-      correlationId
+      correlationId,
     );
 
     // If agentic flow decided to reject / require review, just return that object
@@ -364,6 +238,8 @@ class GeminiService {
       processingTime,
       brand: listingPayload.productIdentification?.brand,
       category: listingPayload.productIdentification?.category,
+      categoryId: listingPayload.productIdentification?.categoryId, // ✅ Fixed
+      validConditions: listingPayload.metadata?.categoryConditions, // ✅ Fixed
       price: listingPayload.pricing?.suggestedPrice,
     });
 
@@ -458,17 +334,17 @@ class GeminiService {
             pricing.strategyRecommendation?.listingFormat || "Fixed Price",
           auctionStartPrice: this._parseFloat(
             pricing.strategyRecommendation?.auctionStartPrice,
-            null
+            null,
           ),
           bestOfferEnabled:
             pricing.strategyRecommendation?.bestOfferEnabled ?? true,
           bestOfferAutoAccept: this._parseFloat(
             pricing.strategyRecommendation?.bestOfferAutoAccept,
-            null
+            null,
           ),
           bestOfferAutoDecline: this._parseFloat(
             pricing.strategyRecommendation?.bestOfferAutoDecline,
-            null
+            null,
           ),
           shippingStrategy:
             pricing.strategyRecommendation?.shippingStrategy || "Buyer Pays",
@@ -631,7 +507,7 @@ class GeminiService {
       throw new Error(
         `Image too large: ${sizeMB.toFixed(2)}MB (max: ${
           this.MAX_IMAGE_SIZE_MB
-        }MB)`
+        }MB)`,
       );
     }
   }

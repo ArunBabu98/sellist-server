@@ -75,7 +75,7 @@ class AIAgentic {
         sellerConfig,
         userProvidedCondition,
       },
-      cid
+      cid,
     );
 
     const processingTime = Date.now() - startTime;
@@ -128,6 +128,7 @@ class AIAgentic {
    */
   async generateVisualSnapshot(buffers, correlationId = null) {
     const cid = correlationId || `ai-visual-${Date.now()}`;
+    const geminiService = require("./gemini2.service");
     logger.info("AIAgentic - Visual Snapshot", {
       correlationId: cid,
       imageCount: buffers.length,
@@ -246,7 +247,12 @@ ANALYZE THE IMAGES NOW AND IDENTIFY THE PRODUCT:
       contents: [{ role: "user", parts }],
     });
 
+    const response = result.response;
+
     const text = result.response.text();
+
+    geminiService._logTokenUsage("Phase1_VisualSnapshot", response, cid);
+
     if (!text) {
       throw new Error("Empty response from generateVisualSnapshot");
     }
@@ -287,9 +293,11 @@ ANALYZE THE IMAGES NOW AND IDENTIFY THE PRODUCT:
   async generateListingFromSnapshot(
     visualSnapshot,
     options = {},
-    correlationId = null
+    correlationId = null,
   ) {
     const cid = correlationId || `ai-listing-${Date.now()}`;
+    logger.info("🚀 USING NEW AI VALIDATION CODE", { correlationId: cid });
+    const geminiService = require("./gemini2.service");
     logger.info("AIAgentic - Listing from snapshot", { correlationId: cid });
 
     const { marketData = [] } = options;
@@ -312,6 +320,11 @@ ANALYZE THE IMAGES NOW AND IDENTIFY THE PRODUCT:
     const brand = productId.brand || "Unbranded";
     const modelName = productId.model || "Unknown";
     const category = productId.category || "Other";
+
+    // ✅ REMOVE THIS - Don't fetch aspects yet, we need category ID first
+    // const { categoryId } = options;
+    // let requiredAspects = [];
+    // if (categoryId) { ... }
 
     const prompt = `
 You are an expert eBay listing creator.
@@ -344,7 +357,6 @@ Generate a COMPLETE listing JSON that matches this schema (NO markdown):
       "included": ["item list"],
       "sellerNote": "1 short trust sentence"
     }
-  }
   },
   "condition": {
     "grade": "New|Like New|Very Good|Good|Acceptable|For parts or not working",
@@ -417,7 +429,7 @@ Generate a COMPLETE listing JSON that matches this schema (NO markdown):
       "suggestedAdRate": "string",
       "reasoning": "string"
     }
-  },
+  }
 }
 
 USE THESE VISUAL VALUES AS GROUND TRUTH (do not contradict them):
@@ -438,8 +450,10 @@ RULES:
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
     });
+    const response = result.response;
 
     const text = result.response.text();
+    geminiService._logTokenUsage("Phase2_ListingGeneration", response, cid);
     if (!text) {
       throw new Error("Empty response from generateListingFromSnapshot");
     }
@@ -453,8 +467,170 @@ RULES:
     const cleaned = this._cleanJson(text);
     const parsed = this._parseJson(cleaned, cid);
 
+    // ✅ ADD THIS: Resolve category path to numeric ID
+    if (parsed.productIdentification?.category) {
+      try {
+        const taxonomyService = require("../../ebay/services/taxonomy.service");
+        const categoryPath = parsed.productIdentification.category;
+
+        logger.info("Resolving eBay category ID", {
+          categoryPath,
+          correlationId: cid,
+        });
+
+        // Call eBay's category suggestion API
+        const categoryResult = await taxonomyService.suggestCategory({
+          title: parsed.title || `${brand} ${modelName}`,
+          categoryPath: categoryPath,
+        });
+
+        if (categoryResult?.categoryId) {
+          const leafCategoryId = await taxonomyService.resolveLeafCategory(
+            categoryResult.categoryId,
+          );
+
+          parsed.productIdentification.categoryId = leafCategoryId;
+          parsed.productIdentification.categoryName =
+            categoryResult.categoryName || categoryPath;
+
+          logger.info("Leaf category resolved", {
+            originalCategory: categoryResult.categoryId,
+            leafCategoryId,
+            correlationId: cid,
+          });
+
+          // Around line 280-350, replace the condition validation section
+
+          try {
+            // ✅ Fetch aspects AND conditions in parallel
+            const [aspectsData, categoryMetadata] = await Promise.all([
+              taxonomyService.getCategoryAspects(leafCategoryId),
+              taxonomyService.getCategoryConditionMetadata(leafCategoryId),
+            ]);
+
+            // ✅ Store condition metadata (with enums) in response
+            parsed.metadata = {
+              ...parsed.metadata,
+              validConditions: categoryMetadata.validEnums, // ✅ Changed: Send enum values
+              conditionMappings: categoryMetadata.conditionMappings, // ✅ New: Full mapping data
+              categoryId: leafCategoryId,
+              categoryName: categoryResult.categoryName,
+            };
+
+            const currentCondition =
+              parsed.condition?.grade || condition.grade || "Used";
+
+            // ✅ Changed: Use new mapping function from taxonomyService
+            const validCondition = taxonomyService.mapConditionForCategory(
+              currentCondition,
+              categoryMetadata,
+            );
+
+            logger.info("Condition validated and mapped", {
+              originalCondition: currentCondition,
+              mappedCondition: validCondition,
+              validEnums: categoryMetadata.validEnums,
+              categoryId: leafCategoryId,
+              correlationId: cid,
+            });
+
+            // Update condition everywhere
+            parsed.condition.grade = validCondition;
+
+            // Extract required aspects
+            const requiredAspects =
+              aspectsData.aspects
+                ?.filter((a) => a.aspectConstraint?.aspectRequired === true)
+                .map((a) => a.localizedAspectName) || [];
+
+            logger.info("Required aspects fetched", {
+              categoryId: leafCategoryId,
+              count: requiredAspects.length,
+              aspects: requiredAspects,
+              validConditionsCount: categoryMetadata.validEnums.length, // ✅ Changed
+              correlationId: cid,
+            });
+
+            // Auto-fill missing required aspects
+            if (requiredAspects.length > 0 && !parsed.itemSpecifics) {
+              parsed.itemSpecifics = {};
+            }
+
+            for (const aspectName of requiredAspects) {
+              if (!parsed.itemSpecifics[aspectName]) {
+                switch (aspectName.toUpperCase()) {
+                  case "BRAND":
+                    parsed.itemSpecifics[aspectName] = brand;
+                    break;
+                  case "MPN":
+                    parsed.itemSpecifics[aspectName] =
+                      productId.mpn || "Does Not Apply";
+                    break;
+                  case "MODEL":
+                    parsed.itemSpecifics[aspectName] = modelName;
+                    break;
+                  case "UPC":
+                    parsed.itemSpecifics[aspectName] =
+                      productId.upc || "Does Not Apply";
+                    break;
+                  case "TYPE":
+                    parsed.itemSpecifics[aspectName] =
+                      visualSnapshot.rawVisualNotes?.possibleSubcategories ||
+                      "Action Figure";
+                    break;
+                  default:
+                    parsed.itemSpecifics[aspectName] = "Not Specified";
+                }
+
+                logger.debug("Auto-filled required aspect", {
+                  aspect: aspectName,
+                  value: parsed.itemSpecifics[aspectName],
+                  correlationId: cid,
+                });
+              }
+            }
+          } catch (aspectErr) {
+            logger.warn("Failed to fetch category metadata", {
+              categoryId: leafCategoryId,
+              error: aspectErr.message,
+              correlationId: cid,
+            });
+
+            // ✅ Changed: Add fallback with proper structure
+            parsed.metadata = {
+              ...parsed.metadata,
+              validConditions: [
+                "NEW",
+                "USED_EXCELLENT",
+                "FOR_PARTS_OR_NOT_WORKING",
+              ],
+              conditionMappings: [
+                { id: 1000, description: "New", enum: "NEW" },
+                { id: 3000, description: "Used", enum: "USED_EXCELLENT" },
+                {
+                  id: 7000,
+                  description: "For parts or not working",
+                  enum: "FOR_PARTS_OR_NOT_WORKING",
+                },
+              ],
+              categoryId: leafCategoryId,
+            };
+          }
+        }
+      } catch (err) {
+        logger.warn("Failed to resolve category ID", {
+          categoryPath: parsed.productIdentification.category,
+          error: err.message,
+          correlationId: cid,
+        });
+      }
+    }
+
     // Post-process itemSpecifics: ensure Brand/Model/Condition filled
     if (parsed.itemSpecifics) {
+      delete parsed.itemSpecifics.Condition;
+      delete parsed.itemSpecifics.condition;
+      delete parsed.itemSpecifics.CONDITION;
       // Fix fallbacks FIRST (before cleanup)
       if (
         !parsed.itemSpecifics.Brand ||
@@ -468,12 +644,12 @@ RULES:
       ) {
         parsed.itemSpecifics.Model = modelName;
       }
-      if (
-        !parsed.itemSpecifics.Condition ||
-        parsed.itemSpecifics.Condition === "string"
-      ) {
-        parsed.itemSpecifics.Condition = condition.grade || "Used";
-      }
+      // if (
+      //   !parsed.itemSpecifics.Condition ||
+      //   parsed.itemSpecifics.Condition === "string"
+      // ) {
+      //   parsed.itemSpecifics.Condition = condition.grade || "Used";
+      // }
 
       // THEN clean invalid values (only after fallbacks)
       Object.keys(parsed.itemSpecifics).forEach((key) => {
@@ -494,7 +670,6 @@ RULES:
         parsed.itemSpecifics = {
           Brand: brand,
           Model: modelName,
-          Condition: condition.grade || "Used",
         };
       }
     }
@@ -519,6 +694,8 @@ RULES:
       correlationId: cid,
       titleLength: parsed.title?.length,
       keywordsCount: parsed.seo?.keywords?.length,
+      categoryId: parsed.productIdentification?.categoryId, // ✅ Log it
+      requiredAspectsCount: Object.keys(parsed.itemSpecifics || {}).length,
     });
 
     return parsed;
@@ -532,6 +709,8 @@ RULES:
   // ===========================================================================
 
   async visualImageID(buffers, correlationId = null) {
+    const cid = correlationId || `visual-id-${Date.now()}`;
+    const geminiService = require("./gemini2.service");
     logger.info("Phase 0 - Image Quality Check", {
       correlationId,
       imageCount: buffers.length,
@@ -559,8 +738,11 @@ RULES:
     const result = await model.generateContent({
       contents: [{ role: "user", parts }],
     });
-
+    const response = result.response;
     const text = result.response.text();
+
+    geminiService._logTokenUsage("Phase0_ImageQuality", response, cid);
+
     if (!text) {
       throw new Error("Empty response from visualImageID");
     }
@@ -577,6 +759,8 @@ RULES:
   }
 
   async visualGrounding(buffers, correlationId = null) {
+    const cid = correlationId || `grounding-${Date.now()}`;
+    const geminiService = require("./gemini2.service");
     logger.info("Phase 1 - Visual Grounding", {
       correlationId,
       imageCount: buffers.length,
@@ -605,8 +789,11 @@ RULES:
     const result = await model.generateContent({
       contents: [{ role: "user", parts }],
     });
+    const response = result.response;
 
     const text = result.response.text();
+    geminiService._logTokenUsage("Phase1_Grounding", response, cid);
+
     if (!text) {
       throw new Error("Empty response from visualGrounding");
     }

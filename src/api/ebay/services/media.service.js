@@ -7,36 +7,54 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 class MediaService {
   async uploadImage(accessToken, imageBuffer, filename) {
-    const maxAttempts = 3;
+    const maxAttempts = 5; // ✅ Increased to 5 for better 503 handling
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         logger.info("Uploading image via eBay Media API", {
           filename,
           attempt,
+          maxAttempts,
         });
 
         return await this._uploadViaMediaApi(
           accessToken,
           imageBuffer,
-          filename
+          filename,
         );
       } catch (err) {
         const status = err.response?.status;
+        const isLastAttempt = attempt === maxAttempts;
 
         logger.warn("Media API upload attempt failed", {
           filename,
           attempt,
+          maxAttempts,
           status,
           error: err.message,
         });
 
-        if (attempt < maxAttempts && this._isRetryable(err)) {
-          await sleep(500 * Math.pow(2, attempt)); // 1s → 2s → 4s
-          continue;
+        if (isLastAttempt || !this._isRetryable(err)) {
+          logger.error("Image upload failed permanently", {
+            filename,
+            attempts: attempt,
+            status,
+          });
+          throw err;
         }
 
-        throw err;
+        // ✅ Exponential backoff with jitter
+        const baseDelay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+        const jitter = Math.random() * 1000; // ✅ Added jitter
+        const delay = baseDelay + jitter;
+
+        logger.info("Retrying image upload", {
+          filename,
+          nextAttempt: attempt + 1,
+          delayMs: Math.round(delay),
+        });
+
+        await sleep(delay);
       }
     }
 
@@ -63,6 +81,7 @@ class MediaService {
       },
       maxBodyLength: Infinity,
       maxContentLength: Infinity,
+      timeout: 30000, // ✅ 30 second timeout
       validateStatus: (s) => s === 200 || s === 201,
     });
 
@@ -75,16 +94,8 @@ class MediaService {
 
     logger.debug("Media API image created", { imageId });
 
-    // Official flow: fetch image metadata
-    const meta = await axios.get(
-      `${EBAY_CONFIG.mediaBaseUrl}/commerce/media/v1_beta/image/${imageId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: "application/json",
-        },
-      }
-    );
+    // ✅ Fetch metadata with retry
+    const meta = await this._getImageMetadata(accessToken, imageId);
 
     const imageUrl = meta.data?.imageUrl;
     const expirationDate = meta.data?.expirationDate;
@@ -104,6 +115,46 @@ class MediaService {
 
   /* ───────────────────────────────────────────── */
 
+  /**
+   * ✅ NEW: Fetch metadata with retry
+   * Sometimes upload succeeds but metadata fetch fails
+   */
+  async _getImageMetadata(accessToken, imageId, maxAttempts = 3) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await axios.get(
+          `${EBAY_CONFIG.mediaBaseUrl}/commerce/media/v1_beta/image/${imageId}`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              Accept: "application/json",
+            },
+            timeout: 10000, // ✅ 10 second timeout
+          },
+        );
+      } catch (err) {
+        if (attempt === maxAttempts) {
+          logger.error("Failed to fetch image metadata", {
+            imageId,
+            attempts: maxAttempts,
+            error: err.message,
+          });
+          throw err;
+        }
+
+        logger.warn("Metadata fetch failed, retrying", {
+          imageId,
+          attempt,
+          nextAttempt: attempt + 1,
+        });
+
+        await sleep(500 * attempt);
+      }
+    }
+  }
+
+  /* ───────────────────────────────────────────── */
+
   _isRetryable(err) {
     const status = err.response?.status;
 
@@ -111,10 +162,11 @@ class MediaService {
       status === 429 || // rate limit
       status === 500 ||
       status === 502 ||
-      status === 503 ||
+      status === 503 || // ✅ Your main issue
       status === 504 ||
       err.code === "ECONNRESET" ||
-      err.code === "ETIMEDOUT"
+      err.code === "ETIMEDOUT" ||
+      err.code === "ECONNREFUSED" // ✅ Added this
     );
   }
 

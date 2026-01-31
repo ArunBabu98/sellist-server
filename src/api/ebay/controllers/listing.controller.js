@@ -4,6 +4,7 @@ const {
   errorResponse,
 } = require("../../../utils/apiResponse");
 const logger = require("../../../config/logger.config");
+const publishService = require("../services/publish.service");
 
 class ListingController {
   async publishListing(req, res) {
@@ -40,6 +41,42 @@ class ListingController {
 
       let message = "Failed to publish listing";
       if (errorData?.errors && errorData.errors.length > 0) {
+        message = errorData.errors.map((e) => e.message).join("; ");
+      }
+
+      errorResponse(res, message, status, errorData?.errors);
+    }
+  }
+  async publishDraftOffer(req, res) {
+    try {
+      const { offerId, includeSubtitle = true } = req.body;
+      const accessToken = req.accessToken;
+
+      if (!offerId) {
+        return errorResponse(res, "offerId is required", 400);
+      }
+
+      logger.info("Publishing existing draft offer", {
+        offerId,
+        includeSubtitle,
+      });
+
+      await publishService.publishOffer(accessToken, offerId);
+
+      logger.info("Draft offer published", { offerId });
+
+      successResponse(res, { offerId }, "Offer published successfully");
+    } catch (error) {
+      logger.error("Publish draft offer failed", {
+        error: error.message,
+        status: error.response?.status,
+      });
+
+      const status = error.response?.status || 500;
+      const errorData = error.response?.data;
+
+      let message = "Failed to publish offer";
+      if (errorData?.errors?.length) {
         message = errorData.errors.map((e) => e.message).join("; ");
       }
 
