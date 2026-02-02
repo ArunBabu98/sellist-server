@@ -2,6 +2,30 @@ const axios = require("axios");
 const EBAY_CONFIG = require("../../../config/ebay.config");
 const logger = require("../../../config/logger.config");
 
+/**
+ * Simple retry helper for transient eBay failures (503 / LSAS warmup)
+ */
+async function retry(fn, { retries = 5, baseDelay = 800, factor = 2 } = {}) {
+  let attempt = 0;
+
+  while (true) {
+    try {
+      return await fn();
+    } catch (e) {
+      const status = e.response?.status;
+
+      // Retry ONLY transient eBay failures
+      if (attempt >= retries || ![503, 504].includes(status)) {
+        throw e;
+      }
+
+      const delay = baseDelay * Math.pow(factor, attempt);
+      await new Promise((r) => setTimeout(r, delay));
+      attempt++;
+    }
+  }
+}
+
 class SetupService {
   async optInPolicies(accessToken) {
     logger.info("eBay Setup: Opt-in to Business Policies started");
