@@ -63,21 +63,28 @@ class DraftingService {
           count: chunk.length,
         });
 
+        const inventoryPayload = {
+          requests: chunk.map((d) => ({
+            sku: d.sku,
+            ...d.inventoryItem,
+          })),
+        };
+
+        logger.debug("DraftingService.inventory:payload", {
+          batchIndex: i / 25,
+          payload: inventoryPayload,
+        });
+
         await axios.post(
           `${EBAY_CONFIG.baseUrl}/sell/inventory/v1/bulk_create_or_replace_inventory_item`,
-          {
-            requests: chunk.map((d) => ({
-              sku: d.sku,
-              ...d.inventoryItem,
-            })),
-          },
+          inventoryPayload,
           {
             headers: {
               Authorization: `Bearer ${accessToken}`,
               "Content-Type": "application/json",
               "Content-Language": "en-US",
             },
-          }
+          },
         );
 
         logger.info("DraftingService.inventory:success", {
@@ -104,7 +111,7 @@ class DraftingService {
               "Content-Type": "application/json",
               "Content-Language": "en-US",
             },
-          }
+          },
         );
 
         logger.debug("DraftingService.offers:response", {
@@ -141,7 +148,7 @@ class DraftingService {
             success: false,
             sku: d.sku,
             error: "Batch failed",
-          })
+          }),
         );
       }
     }
@@ -171,7 +178,7 @@ class DraftingService {
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
-      }
+      },
     );
 
     const offers = res.data.offers || [];

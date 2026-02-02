@@ -1,5 +1,6 @@
 const axios = require("axios");
 const EBAY_CONFIG = require("../../../config/ebay.config");
+const logger = require("../../../config/logger.config");
 
 /**
  * Simple retry helper for transient eBay failures (503 / LSAS warmup)
@@ -26,182 +27,137 @@ async function retry(fn, { retries = 5, baseDelay = 800, factor = 2 } = {}) {
 }
 
 class SetupService {
-  /**
-   * ENTRY POINT
-   * Ensures seller is opted-in and has at least 1 policy of each type.
-   */
-  async ensureDefaultPolicies(accessToken) {
-    // 1️⃣ Opt-in (idempotent)
+  async optInPolicies(accessToken) {
+    logger.info("eBay Setup: Opt-in to Business Policies started");
+
     try {
-      await this.optInPolicies(accessToken);
-    } catch (e) {
-      if (e.response?.status !== 409) throw e;
-    }
-
-    // 2️⃣ Allow eBay internal propagation (CRITICAL)
-    await new Promise((r) => setTimeout(r, 1500));
-
-    // 3️⃣ Fetch existing policies (retry-safe)
-    const policies = await retry(() => this.getPolicies(accessToken));
-
-    const errors = [];
-
-    // 4️⃣ Fulfillment
-    if (!policies.fulfillmentPolicies.length) {
-      try {
-        await retry(() => this.createDefaultFulfillmentPolicy(accessToken));
-      } catch (e) {
-        errors.push(this._normalizeError("FULFILLMENT", e));
-      }
-    }
-
-    // 5️⃣ Payment
-    if (!policies.paymentPolicies.length) {
-      try {
-        await retry(() => this.createDefaultPaymentPolicy(accessToken));
-      } catch (e) {
-        errors.push(this._normalizeError("PAYMENT", e));
-      }
-    }
-
-    // 6️⃣ Returns
-    if (!policies.returnPolicies.length) {
-      try {
-        await retry(() => this.createDefaultReturnPolicy(accessToken));
-      } catch (e) {
-        errors.push(this._normalizeError("RETURN", e));
-      }
-    }
-
-    // 7️⃣ Final verification
-    const finalPolicies = await retry(() => this.getPolicies(accessToken));
-
-    if (
-      !finalPolicies.fulfillmentPolicies.length ||
-      !finalPolicies.paymentPolicies.length ||
-      !finalPolicies.returnPolicies.length
-    ) {
-      const err = new Error(
-        "Seller account not ready for automatic policy setup"
+      await axios.post(
+        `${EBAY_CONFIG.baseUrl}/sell/account/v1/program/opt_in`,
+        { programType: "SELLING_POLICY_MANAGEMENT" },
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+        }
       );
-      err.details = errors;
-      err.retryable = true;
-      throw err;
-    }
 
-    return finalPolicies;
+      logger.info("eBay Setup: Opt-in successful");
+    } catch (error) {
+      logger.warn("eBay Setup: Opt-in failed", {
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+      throw error;
+    }
   }
 
-  // ────────────────────────────────────────────────
-  // EBAY API CALLS
-  // ────────────────────────────────────────────────
+  async createLocation(accessToken) {
+    logger.info("eBay Setup: Creating inventory location");
 
-  async optInPolicies(accessToken) {
-    await axios.post(
-      `${EBAY_CONFIG.baseUrl}/sell/account/v1/program/opt_in`,
-      { programType: "SELLING_POLICY_MANAGEMENT" },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
+    const locationPayload = {
+      location: {
+        address: {
+          addressLine1: "123 Main Street",
+          city: "San Jose",
+          stateOrProvince: "CA",
+          postalCode: "95125",
+          country: "US",
         },
-      }
-    );
+      },
+      locationInstructions: "Items ship from here",
+      name: "Primary Location",
+      merchantLocationStatus: "ENABLED",
+      locationTypes: ["WAREHOUSE"],
+    };
+
+    try {
+      await axios.post(
+        `${EBAY_CONFIG.baseUrl}/sell/inventory/v1/location/default_location`,
+        locationPayload,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      logger.info("eBay Setup: Inventory location created");
+    } catch (error) {
+      logger.warn("eBay Setup: Create location failed", {
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+      throw error;
+    }
   }
 
   async getPolicies(accessToken) {
+    logger.debug("eBay Setup: Fetching seller policies");
+
     const headers = { Authorization: `Bearer ${accessToken}` };
     const marketplaceId = "EBAY_US";
 
-    const [fulfillment, payment, returns] = await Promise.all([
-      axios.get(`${EBAY_CONFIG.baseUrl}/sell/account/v1/fulfillment_policy`, {
-        headers,
-        params: { marketplace_id: marketplaceId },
-      }),
-      axios.get(`${EBAY_CONFIG.baseUrl}/sell/account/v1/payment_policy`, {
-        headers,
-        params: { marketplace_id: marketplaceId },
-      }),
-      axios.get(`${EBAY_CONFIG.baseUrl}/sell/account/v1/return_policy`, {
-        headers,
-        params: { marketplace_id: marketplaceId },
-      }),
-    ]);
+    try {
+      const [fulfillment, payment, returns] = await Promise.all([
+        axios.get(`${EBAY_CONFIG.baseUrl}/sell/account/v1/fulfillment_policy`, {
+          headers,
+          params: { marketplace_id: marketplaceId },
+        }),
+        axios.get(`${EBAY_CONFIG.baseUrl}/sell/account/v1/payment_policy`, {
+          headers,
+          params: { marketplace_id: marketplaceId },
+        }),
+        axios.get(`${EBAY_CONFIG.baseUrl}/sell/account/v1/return_policy`, {
+          headers,
+          params: { marketplace_id: marketplaceId },
+        }),
+      ]);
 
-    return {
-      fulfillmentPolicies: fulfillment.data.fulfillmentPolicies || [],
-      paymentPolicies: payment.data.paymentPolicies || [],
-      returnPolicies: returns.data.returnPolicies || [],
-    };
+      logger.info("eBay Setup: Policies fetched", {
+        fulfillment: fulfillment.data.fulfillmentPolicies?.length || 0,
+        payment: payment.data.paymentPolicies?.length || 0,
+        returns: returns.data.returnPolicies?.length || 0,
+      });
+
+      return {
+        fulfillmentPolicies: fulfillment.data.fulfillmentPolicies || [],
+        paymentPolicies: payment.data.paymentPolicies || [],
+        returnPolicies: returns.data.returnPolicies || [],
+      };
+    } catch (error) {
+      logger.error("eBay Setup: Fetch policies failed", {
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+      throw error;
+    }
   }
 
-  // ────────────────────────────────────────────────
-  // DEFAULT POLICY CREATORS (VALIDATED)
-  // ────────────────────────────────────────────────
+  async getLocations(accessToken) {
+    logger.debug("eBay Setup: Fetching inventory locations");
 
-  async createDefaultFulfillmentPolicy(accessToken) {
-    return axios.post(
-      `${EBAY_CONFIG.baseUrl}/sell/account/v1/fulfillment_policy`,
-      {
-        name: "Sellist Default Shipping",
-        marketplaceId: "EBAY_US",
+    try {
+      const response = await axios.get(
+        `${EBAY_CONFIG.baseUrl}/sell/inventory/v1/location`,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }
+      );
 
-        handlingTime: { unit: "DAY", value: 1 },
+      logger.info("eBay Setup: Locations fetched", {
+        count: response.data.locations?.length || 0,
+      });
 
-        shippingOptions: [
-          {
-            optionType: "DOMESTIC",
-            costType: "CALCULATED",
-
-            shipToLocations: {
-              regionIncluded: [
-                { regionName: "United States", regionType: "COUNTRY" },
-              ],
-            },
-          },
-        ],
-      },
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-  }
-
-  async createDefaultPaymentPolicy(accessToken) {
-    return axios.post(
-      `${EBAY_CONFIG.baseUrl}/sell/account/v1/payment_policy`,
-      {
-        name: "Sellist Default Payment",
-        marketplaceId: "EBAY_US",
-      },
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-  }
-
-  async createDefaultReturnPolicy(accessToken) {
-    return axios.post(
-      `${EBAY_CONFIG.baseUrl}/sell/account/v1/return_policy`,
-      {
-        name: "Sellist 30 Day Returns",
-        marketplaceId: "EBAY_US",
-        returnsAccepted: true,
-        returnPeriod: { unit: "DAY", value: 30 },
-        returnShippingCostPayer: "BUYER",
-      },
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-  }
-
-  // ────────────────────────────────────────────────
-  // UTIL
-  // ────────────────────────────────────────────────
-
-  _normalizeError(policy, e) {
-    return {
-      policy,
-      status: e.response?.status,
-      errorId: e.response?.data?.errors?.[0]?.errorId,
-      message: e.response?.data?.errors?.[0]?.message,
-      raw: e.response?.data || e.message,
-    };
+      return response.data.locations || [];
+    } catch (error) {
+      logger.error("eBay Setup: Fetch locations failed", {
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+      throw error;
+    }
   }
 }
 

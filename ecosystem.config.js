@@ -3,19 +3,23 @@ module.exports = {
     {
       name: "ebay-api",
       script: "./server.js",
-      instances: process.env.NODE_ENV === "production" ? "max" : 1,
-      exec_mode: process.env.NODE_ENV === "production" ? "cluster" : "fork",
 
-      // Environment variables
-      env_production: {
-        NODE_ENV: "production",
-        PORT: 3000,
-        LOG_LEVEL: "info",
-      },
+      // Default (dev)
+      instances: 1,
+      exec_mode: "fork",
+
       env_development: {
         NODE_ENV: "development",
         PORT: 3000,
         LOG_LEVEL: "debug",
+      },
+
+      env_production: {
+        NODE_ENV: "production",
+        PORT: 3000,
+        LOG_LEVEL: "info",
+        instances: "max",
+        exec_mode: "cluster",
       },
 
       // Logging
@@ -24,7 +28,7 @@ module.exports = {
       log_date_format: "YYYY-MM-DD HH:mm:ss Z",
       merge_logs: true,
 
-      // Auto-restart configuration
+      // Stability
       max_memory_restart: "500M",
       min_uptime: "10s",
       max_restarts: 10,
@@ -35,7 +39,6 @@ module.exports = {
       wait_ready: true,
       listen_timeout: 10000,
 
-      // Monitoring
       instance_var: "INSTANCE_ID",
     },
   ],

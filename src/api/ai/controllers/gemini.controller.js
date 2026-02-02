@@ -1,6 +1,6 @@
 // controllers/gemini.controller.js
 
-const geminiService = require("../services/gemini2.service");
+const geminiService = require("../services/gemini.service");
 const {
   successResponse,
   errorResponse,
@@ -8,6 +8,15 @@ const {
 const logger = require("../../../config/logger.config");
 
 class GeminiController {
+  constructor() {
+    // ✅ Bind all methods to ensure 'this' is preserved
+    this.analyzeImage = this.analyzeImage.bind(this);
+    this.analyzeImages = this.analyzeImages.bind(this);
+    this.analyzeBulkProducts = this.analyzeBulkProducts.bind(this);
+    this.generateHtmlTemplate = this.generateHtmlTemplate.bind(this);
+    this.draftTermsOfService = this.draftTermsOfService.bind(this);
+  }
+
   /**
    * Analyze a single product image
    * POST /api/ai/analyze-image
@@ -32,7 +41,7 @@ class GeminiController {
 
       const listingPayload = await geminiService.analyzeMultipleImages(
         normalized,
-        options || {}
+        options || {},
       );
 
       // Handle rejection cases
@@ -47,7 +56,7 @@ class GeminiController {
             guidance:
               listingPayload.details?.compliance?.reason ||
               "This item cannot be sold on eBay",
-          }
+          },
         );
       }
 
@@ -61,7 +70,17 @@ class GeminiController {
         });
       }
 
-      return successResponse(res, listingPayload, "Analysis successful");
+      // ✅ Extract and format category info for client
+      const categoryInfo = this._extractCategoryInfo(listingPayload);
+
+      return successResponse(
+        res,
+        {
+          ...listingPayload,
+          categoryInfo, // ✅ Add structured category info
+        },
+        "Analysis successful",
+      );
     } catch (err) {
       logger.error("AI analyzeImage failed", {
         error: err.message,
@@ -94,7 +113,7 @@ class GeminiController {
             field: "images",
             expected: "array of { imageBase64, mimeType }",
             received: typeof images,
-          }
+          },
         );
       }
 
@@ -109,7 +128,7 @@ class GeminiController {
             {
               field: `images[${i}].imageBase64`,
               expected: "base64 string",
-            }
+            },
           );
         }
 
@@ -130,7 +149,7 @@ class GeminiController {
               field: `images[${i}].mimeType`,
               expected: validMimeTypes,
               received: mimeType,
-            }
+            },
           );
         }
       }
@@ -145,7 +164,7 @@ class GeminiController {
             field: "images",
             maxAllowed: 16,
             received: images.length,
-          }
+          },
         );
       }
 
@@ -171,7 +190,7 @@ class GeminiController {
           marketData: options?.marketData || [],
           sellerConfig: options?.sellerConfig || {},
           hostedImageUrls: options?.hostedImageUrls || [],
-        }
+        },
       );
 
       // =====================================================================
@@ -199,7 +218,7 @@ class GeminiController {
               listingPayload.details?.recommendations?.guidance ||
               "This item is prohibited on eBay marketplace",
             processingTime: listingPayload.metadata?.processingTime,
-          }
+          },
         );
       }
 
@@ -229,25 +248,34 @@ class GeminiController {
               listingPayload.details?.recommendations?.additionalChecksNeeded ||
               [],
             processingTime: listingPayload.metadata?.processingTime,
-          }
+          },
         );
       }
 
       // =====================================================================
-      // SUCCESS - Return Complete Listing Payload
+      // SUCCESS - Return Complete Listing Payload with Category Info
       // =====================================================================
       logger.info("analyzeImages:success", {
         requestId,
         brand: listingPayload.productIdentification?.brand,
         category: listingPayload.productIdentification?.category,
+        categoryId: listingPayload.productIdentification?.categoryId,
+        validConditionsCount:
+          listingPayload.metadata?.categoryConditions?.length,
         price: listingPayload.pricing?.suggestedPrice,
         processingTime: listingPayload.metadata?.processingTime,
       });
 
+      // ✅ Extract and format category info for client
+      const categoryInfo = this._extractCategoryInfo(listingPayload);
+
       return successResponse(
         res,
-        listingPayload,
-        "Multi-image analysis successful"
+        {
+          ...listingPayload,
+          categoryInfo, // ✅ Add structured category info at top level
+        },
+        "Multi-image analysis successful",
       );
     } catch (err) {
       logger.error("AI analyzeImages failed", {
@@ -273,9 +301,44 @@ class GeminiController {
         res,
         "AI multi-image analysis failed",
         500,
-        err.message
+        err.message,
       );
     }
+  }
+
+  /**
+   * ✅ Helper: Extract category info from listing payload
+   * @private
+   */
+  _extractCategoryInfo(listingPayload) {
+    const productId = listingPayload.productIdentification || {};
+    const metadata = listingPayload.metadata || {};
+
+    return {
+      categoryId: productId.categoryId || null,
+      categoryName: productId.categoryName || productId.category || null,
+      categoryPath: productId.category || null,
+      validConditions: metadata.categoryConditions || [
+        "New",
+        "Used",
+        "For parts or not working",
+      ],
+      currentCondition: listingPayload.condition?.grade || "Used",
+      requiredAspects: this._extractRequiredAspects(listingPayload),
+    };
+  }
+
+  /**
+   * ✅ Helper: Extract required aspects from itemSpecifics
+   * @private
+   */
+  _extractRequiredAspects(listingPayload) {
+    const itemSpecifics = listingPayload.itemSpecifics || {};
+
+    // Return list of required aspects that are already filled
+    return Object.keys(itemSpecifics).filter(
+      (key) => itemSpecifics[key] && itemSpecifics[key] !== "Not Specified",
+    );
   }
 
   /**
@@ -292,7 +355,7 @@ class GeminiController {
         return errorResponse(
           res,
           "images array is required for bulk analysis",
-          400
+          400,
         );
       }
 
@@ -310,7 +373,7 @@ class GeminiController {
       // For now, return placeholder
       const products = await geminiService.analyzeBulkProducts(
         normalized,
-        options || {}
+        options || {},
       );
 
       logger.info("AI analyzeBulkProducts succeeded", {
@@ -321,7 +384,7 @@ class GeminiController {
       return successResponse(
         res,
         { products },
-        `Successfully separated ${products.length} product(s)`
+        `Successfully separated ${products.length} product(s)`,
       );
     } catch (err) {
       logger.error("AI analyzeBulkProducts failed", {
@@ -351,7 +414,7 @@ class GeminiController {
 
       const html = await geminiService.generateHtmlTemplate(
         listingData,
-        options || {}
+        options || {},
       );
 
       return successResponse(res, { html }, "HTML template generated");
@@ -365,7 +428,7 @@ class GeminiController {
         res,
         "HTML template generation failed",
         500,
-        err.message
+        err.message,
       );
     }
   }
@@ -395,7 +458,7 @@ class GeminiController {
         res,
         "Terms of Service generation failed",
         500,
-        err.message
+        err.message,
       );
     }
   }

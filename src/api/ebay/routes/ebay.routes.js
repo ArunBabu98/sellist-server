@@ -68,10 +68,11 @@ router.get("/policies", verifyBearerToken, setupController.getPolicies);
 
 router.get("/locations", verifyBearerToken, setupController.getLocations);
 
+// Listing routes
 router.post(
-  "/ensure-policies",
+  "/publish-offer",
   verifyBearerToken,
-  setupController.ensurePolicies
+  listingController.publishDraftOffer
 );
 
 module.exports = router;
