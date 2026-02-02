@@ -1,6 +1,6 @@
 // controllers/gemini.controller.js
 
-const geminiService = require("../services/gemini2.service");
+const geminiService = require("../services/gemini.service");
 const {
   successResponse,
   errorResponse,

@@ -12,14 +12,705 @@ const {
 class AIAgentic {
   constructor() {
     this.genAI = new GoogleGenerativeAI(config.ai.geminiApiKey);
-    this.filterModel = "gemini-2.5-flash"; // Cheap for filters
-    this.reasoningModel = "gemini-2.5-flash"; // Better for analysis
+    this.filterModel = "gemini-2.5-flash"; // Vision + high-accuracy extraction
+    this.reasoningModel = "gemini-2.5-flash"; // Text-only reasoning/listing
   }
 
   // ===========================================================================
-  // PHASE 0: Image Quality & Role Assignment
+  // PUBLIC HIGH-LEVEL API
   // ===========================================================================
+
+  /**
+   * NEW: Full pipeline using 2 calls:
+   *  1) Visual snapshot (high visual accuracy, no pricing)
+   *  2) Listing generation from snapshot + market/seller context
+   *
+   * @param {Array<{buffer: Buffer, mimeType: string, index?: number}>} buffers
+   * @param {Object} options { marketData, sellerConfig, userProvidedCondition }
+   * @param {string|null} correlationId
+   * @returns {Promise<Object>} listing payload in full _mapToListingPayload shape
+   */
+  async generateCompleteListing(buffers, options = {}, correlationId = null) {
+    const startTime = Date.now();
+    const cid = correlationId || `ai-agentic-${Date.now()}`;
+
+    logger.info("AIAgentic - generateCompleteListing: start", {
+      correlationId: cid,
+      imageCount: buffers.length,
+    });
+
+    // 1) Visual snapshot (vision-heavy, accurate)
+    const visualSnapshot = await this.generateVisualSnapshot(buffers, cid);
+
+    // Early compliance rejection / manual review
+    if (!visualSnapshot.compliance.isEbayCompliant) {
+      logger.warn("AIAgentic - compliance rejected", {
+        correlationId: cid,
+      });
+
+      return {
+        success: false,
+        rejected: true,
+        reason: "EBAY_POLICY_VIOLATION",
+        details: visualSnapshot,
+        metadata: {
+          correlationId: cid,
+          code: code,
+          processingTime: Date.now() - startTime,
+        },
+      };
+    }
+
+    // 2) Listing generation from snapshot + context
+    const {
+      marketData = [],
+      sellerConfig = {},
+      userProvidedCondition = null,
+    } = options;
+
+    const listingCore = await this.generateListingFromSnapshot(
+      visualSnapshot,
+      {
+        marketData,
+        sellerConfig,
+        userProvidedCondition,
+      },
+      cid,
+    );
+
+    const processingTime = Date.now() - startTime;
+
+    // listingCore is already shaped like _mapToListingPayload,
+    // but we also inject/override metadata to match client expectations
+    const finalPayload = {
+      ...listingCore,
+      metadata: {
+        ...(listingCore.metadata || {}),
+        correlationId: cid,
+        processingTime,
+      },
+    };
+
+    logger.info("AIAgentic - generateCompleteListing: success", {
+      correlationId: cid,
+      brand: finalPayload.productIdentification?.brand,
+      category: finalPayload.productIdentification?.category,
+      price: finalPayload.pricing?.suggestedPrice,
+      processingTime,
+    });
+
+    return finalPayload;
+  }
+
+  // ===========================================================================
+  // STEP 1: VISUAL SNAPSHOT (HIGH VISUAL ACCURACY)
+  // Combines: image quality, grounding, physical attributes, basic compliance
+  // ===========================================================================
+
+  /**
+   * Generate a high-accuracy visual snapshot of the product.
+   * This is the only vision-heavy call.
+   *
+   * @param {Array<{buffer: Buffer, mimeType: string, index?: number}>} buffers
+   * @param {string|null} correlationId
+   * @returns {Promise<Object>} visual snapshot JSON
+   *
+   * Shape:
+   * {
+   *   productIdentification: { brand, model, category, upc, mpn, confidence },
+   *   condition: { grade, numericScore, description, flaws, userOverride },
+   *   weight: {...},
+   *   dimensions: {...},
+   *   compliance: {...},
+   *   recommendations: {...},
+   *   rawVisualNotes: {...}
+   * }
+   */
+  async generateVisualSnapshot(buffers, correlationId = null) {
+    const cid = correlationId || `ai-visual-${Date.now()}`;
+    const geminiService = require("./gemini.service");
+    logger.info("AIAgentic - Visual Snapshot", {
+      correlationId: cid,
+      imageCount: buffers.length,
+    });
+
+    const model = this.genAI.getGenerativeModel({
+      model: this.filterModel,
+      generationConfig: {
+        maxOutputTokens: 4096,
+        temperature: 0.2, // ✅ Lower for more deterministic brand detection
+        responseMimeType: "application/json",
+      },
+    });
+
+    const prompt = `
+You are an expert eBay product identifier with deep knowledge of brands, logos, packaging, and product markings.
+
+CRITICAL TASK: Identify the product from images with MAXIMUM ACCURACY.
+
+BRAND IDENTIFICATION PRIORITY (in order):
+1. **Visible logos** - Check all angles for brand logos, emblems, tags
+2. **Text on product** - Brand names printed, engraved, or stamped on item
+3. **Packaging** - Boxes, bags, tags with brand names
+4. **Product design** - Distinctive shapes, colors, patterns associated with specific brands
+5. **Licensing marks** - "©", "®", "™" followed by company names
+6. **Model numbers** - Often contain brand prefixes
+
+IMPORTANT RULES FOR BRAND:
+- If you see ANY brand indicator (logo, text, design), identify it
+- Common toy brands: My Little Pony, Hasbro, Mattel, LEGO, Disney, etc.
+- For toys/collectibles: Check for character names that imply brand (e.g., "Sparkleworks" = My Little Pony character)
+- If product has distinctive licensed character, infer brand from franchise
+- Only use "Unbranded" if genuinely generic with NO identifiable marks
+- If uncertain between 2 brands, choose the one with stronger visual evidence
+
+MODEL IDENTIFICATION:
+- Look for specific product names, series names, character names
+- Check for model numbers, SKUs, or edition names
+- For characters: Use character name as model (e.g., "Sparkleworks", "Rainbow Dash")
+
+CATEGORY:
+- Use eBay-style category paths (e.g., "Toys & Hobbies > TV & Movie Character Toys > My Little Pony")
+- Be specific where possible
+
+WEIGHT & DIMENSIONS:
+- Estimate based on product type and visible size
+- Add 15% to weight for packaging
+- Reference guide:
+ • Small toy figure: 3-6 oz
+ • Action figure: 5-10 oz
+ • Plush toy: 6-16 oz
+ • Board game: 24-48 oz
+
+CONDITION ASSESSMENT:
+- Grade: "New|Like New|Very Good|Good|Acceptable|For parts or not working"
+- List ALL visible flaws honestly
+
+OUTPUT STRICT JSON (NO MARKDOWN):
+
+{
+  "productIdentification": {
+    "brand": "IDENTIFIED BRAND or 'Unbranded'",
+    "model": "Character/model name or null",
+    "category": "eBay category path",
+    "upc": "string or null",
+    "mpn": "string or null",
+    "confidence": 0-1
+  },
+  "condition": {
+    "grade": "New|Like New|Very Good|Good|Acceptable|For parts or not working",
+    "flaws": ["short phrase"],
+  },
+  "weight": {
+    "value": number,
+    "unit": "oz",
+    "confidence": "high|medium|low"
+  },
+  "dimensions": {
+    "length": number,
+    "width": number,
+    "height": number,
+    "unit": "inches",
+    "confidenceLevel": "high|medium|low"
+  },
+  "compliance": {
+    "isEbayCompliant": boolean,
+    "code": "string|null"
+  },
+  "rawVisualNotes": {
+    "visibleText": ["all visible text on product/packaging"],
+    "logoHints": ["observed logos, symbols, brand marks"],
+    "possibleSubcategories": ["specific product type hints"]
+  }
+}
+
+EXAMPLES OF GOOD BRAND IDENTIFICATION:
+- Pink pony toy with purple hair and sparkle cutie mark → Brand: "My Little Pony", Model: "Sparkleworks"
+- Blue hedgehog with red shoes → Brand: "Sega", Model: "Sonic the Hedgehog"
+- Yellow electric mouse with red cheeks → Brand: "Nintendo", Model: "Pikachu"
+- Building blocks with circular studs → Brand: "LEGO"
+
+ANALYZE THE IMAGES NOW AND IDENTIFY THE PRODUCT:
+`;
+
+    const parts = [{ text: prompt }];
+    for (const img of buffers) {
+      parts.push({
+        inlineData: {
+          data: img.buffer.toString("base64"),
+          mimeType: img.mimeType,
+        },
+      });
+    }
+
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts }],
+    });
+
+    const response = result.response;
+
+    const text = result.response.text();
+
+    geminiService._logTokenUsage("Phase1_VisualSnapshot", response, cid);
+
+    if (!text) {
+      throw new Error("Empty response from generateVisualSnapshot");
+    }
+
+    logger.debug("Visual Snapshot raw response length", {
+      correlationId: cid,
+      responseLength: text?.length,
+    });
+
+    const cleaned = this._cleanJson(text);
+    const parsed = this._parseJson(cleaned, cid);
+
+    logger.info("AIAgentic - Visual Snapshot complete", {
+      correlationId: cid,
+      brand: parsed.productIdentification?.brand,
+      model: parsed.productIdentification?.model,
+      category: parsed.productIdentification?.category,
+      confidence: parsed.productIdentification?.confidence,
+      compliant: parsed.compliance?.isEbayCompliant,
+    });
+
+    return parsed;
+  }
+
+  // ===========================================================================
+  // STEP 2: LISTING FROM SNAPSHOT (TEXT-ONLY REASONING)
+  // Generates full listing structure compatible with _mapToListingPayload.
+  // ===========================================================================
+
+  /**
+   * Generate full listing payload from a visualSnapshot + context.
+   *
+   * @param {Object} visualSnapshot - output of generateVisualSnapshot
+   * @param {Object} options { marketData, sellerConfig, userProvidedCondition }
+   * @param {string|null} correlationId
+   * @returns {Promise<Object>} listing payload in _mapToListingPayload shape
+   */
+  async generateListingFromSnapshot(
+    visualSnapshot,
+    options = {},
+    correlationId = null,
+  ) {
+    const cid = correlationId || `ai-listing-${Date.now()}`;
+    logger.info("🚀 USING NEW AI VALIDATION CODE", { correlationId: cid });
+    const geminiService = require("./gemini.service");
+    logger.info("AIAgentic - Listing from snapshot", { correlationId: cid });
+
+    const { marketData = [] } = options;
+
+    const productId = visualSnapshot.productIdentification || {};
+    const condition = visualSnapshot.condition || {};
+    const weight = visualSnapshot.weight || {};
+    const dimensions = visualSnapshot.dimensions || {};
+    const visualNotes = visualSnapshot.rawVisualNotes || {};
+
+    const model = this.genAI.getGenerativeModel({
+      model: this.reasoningModel,
+      generationConfig: {
+        maxOutputTokens: 4096,
+        temperature: 0.35,
+        responseMimeType: "application/json",
+      },
+    });
+
+    const brand = productId.brand || "Unbranded";
+    const modelName = productId.model || "Unknown";
+    const category = productId.category || "Other";
+
+    // ✅ REMOVE THIS - Don't fetch aspects yet, we need category ID first
+    // const { categoryId } = options;
+    // let requiredAspects = [];
+    // if (categoryId) { ... }
+
+    const prompt = `
+You are an expert eBay listing creator.
+
+INPUT:
+- Visual snapshot (already extracted from images)
+- Market data (sold listings)
+- Seller config (shipping, returns, etc.)
+
+GOAL:
+Generate a COMPLETE listing JSON that matches this schema (NO markdown):
+
+{
+  "productIdentification": {
+    "brand": "string",
+    "model": "string",
+    "category": "string",
+    "upc": "string|null",
+    "mpn": "string|null"
+  },
+  "title": "SEO-optimized title (<=80 chars)",
+  "subtitle": "string|null",
+  "description": {
+    "plainText": "<=180 words, factual, buyer-focused",
+    "structure": {
+      "hook": "1-2 concise sentences",
+      "condition": "1 sentence, honest",
+      "keyFeatures": ["short bullet"],
+      "specs": ["key: value"],
+      "included": ["item list"],
+      "sellerNote": "1 short trust sentence"
+    }
+  },
+  "condition": {
+    "grade": "New|Like New|Very Good|Good|Acceptable|For parts or not working",
+    "flaws": ["short phrase"],
+  },
+  "weight": {
+    "value": number,
+    "unit": "oz",
+    "confidence": "high|medium|low"
+  },
+  "dimensions": {
+    "length": number|null,
+    "width": number|null,
+    "height": number|null,
+    "unit": "inches",
+    "confidenceLevel": "high|medium|low"
+  },
+  "pricing": {
+    "suggestedPrice": number,
+    "priceRange": { "min": number, "max": number },
+    "currency": "USD",
+    "confidenceScore": 0-1,
+    "rationale": "string",
+    "marketAnalysis": {
+      "soldListingsAnalyzed": number,
+      "averageSoldPrice": number|null,
+      "priceDistribution": "string",
+      "competitivePosition": "string"
+    },
+    "strategyRecommendation": {
+      "listingFormat": "Fixed Price|Auction|Both",
+      "auctionStartPrice": number|null,
+      "bestOfferEnabled": boolean,
+      "bestOfferAutoAccept": number|null,
+      "bestOfferAutoDecline": number|null,
+      "shippingStrategy": "Buyer Pays|Free Shipping|Calculated",
+      "reasoning": "string"
+    }
+  },
+  "shipping": {
+    "recommendedService": "string",
+    "estimatedCost": number,
+    "handlingTime": "string",
+    "packageType": "string",
+    "requiresSignature": boolean,
+    "fragile": boolean,
+    "sellerTemplateMatch": "string|null"
+  },
+  "itemSpecifics": {
+    "Brand": "string",
+    "Model": "string",
+    "Condition": "string",
+    "Type": "string|null",
+    "Color": "string|null",
+    "Material": "string|null",
+    "Character": "string|null",
+    "Year": "string|null"
+  },
+  "seo": {
+    "keywords": ["short phrase"]
+  },
+  "listingRecommendations": {
+    "bestOfferEnabled": boolean,
+    "internationalShipping": boolean,
+    "returnsAccepted": boolean,
+    "returnPeriod": "string",
+    "returnShippingPaidBy": "Buyer|Seller",
+    "promotedListings": {
+      "recommended": boolean,
+      "suggestedAdRate": "string",
+      "reasoning": "string"
+    }
+  }
+}
+
+USE THESE VISUAL VALUES AS GROUND TRUTH (do not contradict them):
+
+Visual snapshot:
+${JSON.stringify(visualSnapshot, null, 2)}
+
+RULES:
+- Brand, Model, Category must come from productIdentification above.
+- Keep description <= 400 words.
+- Price using comparable similar eBay listings.
+- NEVER output markdown, ONLY a single valid JSON object.
+- NEVER return multiple JSON objects or arrays. Only ONE object with the exact keys shown above.
+- DO NOT leave any array empty. If you would leave it empty, instead add at least one best-guess element.
+- DO NOT invent new top-level keys or remove any of the required ones.
+`;
+
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    });
+    const response = result.response;
+
+    const text = result.response.text();
+    geminiService._logTokenUsage("Phase2_ListingGeneration", response, cid);
+    if (!text) {
+      throw new Error("Empty response from generateListingFromSnapshot");
+    }
+
+    logger.debug("Listing from snapshot raw response", {
+      correlationId: cid,
+      responseLength: text?.length,
+      preview: text.slice(0, 200),
+    });
+
+    const cleaned = this._cleanJson(text);
+    const parsed = this._parseJson(cleaned, cid);
+
+    // ✅ ADD THIS: Resolve category path to numeric ID
+    if (parsed.productIdentification?.category) {
+      try {
+        const taxonomyService = require("../../ebay/services/taxonomy.service");
+        const categoryPath = parsed.productIdentification.category;
+
+        logger.info("Resolving eBay category ID", {
+          categoryPath,
+          correlationId: cid,
+        });
+
+        // Call eBay's category suggestion API
+        const categoryResult = await taxonomyService.suggestCategory({
+          title: parsed.title || `${brand} ${modelName}`,
+          categoryPath: categoryPath,
+        });
+
+        if (categoryResult?.categoryId) {
+          const leafCategoryId = await taxonomyService.resolveLeafCategory(
+            categoryResult.categoryId,
+          );
+
+          parsed.productIdentification.categoryId = leafCategoryId;
+          parsed.productIdentification.categoryName =
+            categoryResult.categoryName || categoryPath;
+
+          logger.info("Leaf category resolved", {
+            originalCategory: categoryResult.categoryId,
+            leafCategoryId,
+            correlationId: cid,
+          });
+
+          // Around line 280-350, replace the condition validation section
+
+          try {
+            // ✅ Fetch aspects AND conditions in parallel
+            const [aspectsData, categoryMetadata] = await Promise.all([
+              taxonomyService.getCategoryAspects(leafCategoryId),
+              taxonomyService.getCategoryConditionMetadata(leafCategoryId),
+            ]);
+
+            // ✅ Store condition metadata (with enums) in response
+            parsed.metadata = {
+              ...parsed.metadata,
+              validConditions: categoryMetadata.validEnums, // ✅ Changed: Send enum values
+              conditionMappings: categoryMetadata.conditionMappings, // ✅ New: Full mapping data
+              categoryId: leafCategoryId,
+              categoryName: categoryResult.categoryName,
+            };
+
+            const currentCondition =
+              parsed.condition?.grade || condition.grade || "Used";
+
+            // ✅ Changed: Use new mapping function from taxonomyService
+            const validCondition = taxonomyService.mapConditionForCategory(
+              currentCondition,
+              categoryMetadata,
+            );
+
+            logger.info("Condition validated and mapped", {
+              originalCondition: currentCondition,
+              mappedCondition: validCondition,
+              validEnums: categoryMetadata.validEnums,
+              categoryId: leafCategoryId,
+              correlationId: cid,
+            });
+
+            // Update condition everywhere
+            parsed.condition.grade = validCondition;
+
+            // Extract required aspects
+            const requiredAspects =
+              aspectsData.aspects
+                ?.filter((a) => a.aspectConstraint?.aspectRequired === true)
+                .map((a) => a.localizedAspectName) || [];
+
+            logger.info("Required aspects fetched", {
+              categoryId: leafCategoryId,
+              count: requiredAspects.length,
+              aspects: requiredAspects,
+              validConditionsCount: categoryMetadata.validEnums.length, // ✅ Changed
+              correlationId: cid,
+            });
+
+            // Auto-fill missing required aspects
+            if (requiredAspects.length > 0 && !parsed.itemSpecifics) {
+              parsed.itemSpecifics = {};
+            }
+
+            for (const aspectName of requiredAspects) {
+              if (!parsed.itemSpecifics[aspectName]) {
+                switch (aspectName.toUpperCase()) {
+                  case "BRAND":
+                    parsed.itemSpecifics[aspectName] = brand;
+                    break;
+                  case "MPN":
+                    parsed.itemSpecifics[aspectName] =
+                      productId.mpn || "Does Not Apply";
+                    break;
+                  case "MODEL":
+                    parsed.itemSpecifics[aspectName] = modelName;
+                    break;
+                  case "UPC":
+                    parsed.itemSpecifics[aspectName] =
+                      productId.upc || "Does Not Apply";
+                    break;
+                  case "TYPE":
+                    parsed.itemSpecifics[aspectName] =
+                      visualSnapshot.rawVisualNotes?.possibleSubcategories ||
+                      "Action Figure";
+                    break;
+                  default:
+                    parsed.itemSpecifics[aspectName] = "Not Specified";
+                }
+
+                logger.debug("Auto-filled required aspect", {
+                  aspect: aspectName,
+                  value: parsed.itemSpecifics[aspectName],
+                  correlationId: cid,
+                });
+              }
+            }
+          } catch (aspectErr) {
+            logger.warn("Failed to fetch category metadata", {
+              categoryId: leafCategoryId,
+              error: aspectErr.message,
+              correlationId: cid,
+            });
+
+            // ✅ Changed: Add fallback with proper structure
+            parsed.metadata = {
+              ...parsed.metadata,
+              validConditions: [
+                "NEW",
+                "USED_EXCELLENT",
+                "FOR_PARTS_OR_NOT_WORKING",
+              ],
+              conditionMappings: [
+                { id: 1000, description: "New", enum: "NEW" },
+                { id: 3000, description: "Used", enum: "USED_EXCELLENT" },
+                {
+                  id: 7000,
+                  description: "For parts or not working",
+                  enum: "FOR_PARTS_OR_NOT_WORKING",
+                },
+              ],
+              categoryId: leafCategoryId,
+            };
+          }
+        }
+      } catch (err) {
+        logger.warn("Failed to resolve category ID", {
+          categoryPath: parsed.productIdentification.category,
+          error: err.message,
+          correlationId: cid,
+        });
+      }
+    }
+
+    // Post-process itemSpecifics: ensure Brand/Model/Condition filled
+    if (parsed.itemSpecifics) {
+      delete parsed.itemSpecifics.Condition;
+      delete parsed.itemSpecifics.condition;
+      delete parsed.itemSpecifics.CONDITION;
+      // Fix fallbacks FIRST (before cleanup)
+      if (
+        !parsed.itemSpecifics.Brand ||
+        parsed.itemSpecifics.Brand === "string"
+      ) {
+        parsed.itemSpecifics.Brand = brand;
+      }
+      if (
+        !parsed.itemSpecifics.Model ||
+        parsed.itemSpecifics.Model === "string"
+      ) {
+        parsed.itemSpecifics.Model = modelName;
+      }
+      // if (
+      //   !parsed.itemSpecifics.Condition ||
+      //   parsed.itemSpecifics.Condition === "string"
+      // ) {
+      //   parsed.itemSpecifics.Condition = condition.grade || "Used";
+      // }
+
+      // THEN clean invalid values (only after fallbacks)
+      Object.keys(parsed.itemSpecifics).forEach((key) => {
+        const value = parsed.itemSpecifics[key];
+        if (
+          value === null ||
+          value === "null" ||
+          value === "string" ||
+          value === "" ||
+          value === undefined
+        ) {
+          delete parsed.itemSpecifics[key];
+        }
+      });
+
+      // Safety: Ensure minimum required fields exist
+      if (Object.keys(parsed.itemSpecifics).length === 0) {
+        parsed.itemSpecifics = {
+          Brand: brand,
+          Model: modelName,
+        };
+      }
+    }
+
+    // Ensure essential blocks exist and fallback to visual snapshot where needed
+    parsed.productIdentification = parsed.productIdentification || {
+      brand,
+      model: modelName,
+      category,
+      upc: productId.upc || null,
+      mpn: productId.mpn || null,
+    };
+
+    parsed.condition = parsed.condition || {
+      flaws: condition.flaws || [],
+    };
+
+    parsed.weight = parsed.weight || weight;
+    parsed.dimensions = parsed.dimensions || dimensions;
+
+    logger.info("AIAgentic - Listing from snapshot complete", {
+      correlationId: cid,
+      titleLength: parsed.title?.length,
+      keywordsCount: parsed.seo?.keywords?.length,
+      categoryId: parsed.productIdentification?.categoryId, // ✅ Log it
+      requiredAspectsCount: Object.keys(parsed.itemSpecifics || {}).length,
+    });
+
+    return parsed;
+  }
+
+  // ===========================================================================
+  // LEGACY PHASE METHODS (OPTIONAL)
+  // Kept for backward compatibility if you still call them individually.
+  // visualImageID, visualGrounding, extractPhysicalAttributes, analyzePricingStrategy,
+  // generateListingContent can remain or be removed if unused.
+  // ===========================================================================
+
   async visualImageID(buffers, correlationId = null) {
+    const cid = correlationId || `visual-id-${Date.now()}`;
+    const geminiService = require("./gemini.service");
     logger.info("Phase 0 - Image Quality Check", {
       correlationId,
       imageCount: buffers.length,
@@ -47,15 +738,17 @@ class AIAgentic {
     const result = await model.generateContent({
       contents: [{ role: "user", parts }],
     });
-
+    const response = result.response;
     const text = result.response.text();
+
+    geminiService._logTokenUsage("Phase0_ImageQuality", response, cid);
+
     if (!text) {
       throw new Error("Empty response from visualImageID");
     }
 
     const cleaned = this._cleanJson(text);
     const parsed = this._parseJson(cleaned, correlationId);
-    this._validateSchema(parsed, ["images", "summary"]);
 
     logger.info("Phase 0 complete", {
       correlationId,
@@ -65,10 +758,9 @@ class AIAgentic {
     return parsed;
   }
 
-  // ===========================================================================
-  // PHASE 1: Visual Grounding - Product ID + Compliance
-  // ===========================================================================
   async visualGrounding(buffers, correlationId = null) {
+    const cid = correlationId || `grounding-${Date.now()}`;
+    const geminiService = require("./gemini.service");
     logger.info("Phase 1 - Visual Grounding", {
       correlationId,
       imageCount: buffers.length,
@@ -97,15 +789,17 @@ class AIAgentic {
     const result = await model.generateContent({
       contents: [{ role: "user", parts }],
     });
+    const response = result.response;
 
     const text = result.response.text();
+    geminiService._logTokenUsage("Phase1_Grounding", response, cid);
+
     if (!text) {
       throw new Error("Empty response from visualGrounding");
     }
 
     const cleaned = this._cleanJson(text);
     const parsed = this._parseJson(cleaned, correlationId);
-    this._validateSchema(parsed, ["productIdentification", "compliance"]);
 
     logger.info("Phase 1 complete", {
       correlationId,
@@ -116,438 +810,41 @@ class AIAgentic {
     return parsed;
   }
 
-  // ===========================================================================
-  // PHASE 2: Physical Attributes - Weight, Dimensions, Condition
-  // ===========================================================================
-  // services/ai.agentic.js - Update extractPhysicalAttributes method
-
-  async extractPhysicalAttributes(buffers, productContext, correlationId) {
-    logger.info("Phase 2 - Physical Attributes", { correlationId });
-
-    const model = this.genAI.getGenerativeModel({
-      model: this.filterModel,
-      // ✅ ADD: Generation config to ensure complete responses
-      generationConfig: {
-        maxOutputTokens: 2048, // Increased from default
-        temperature: 0.4, // Lower for more deterministic output
-      },
-    });
-
-    const prompt = `
-Product: ${productContext.category || "Unknown"} | ${
-      productContext.brand || "Unknown"
-    } | ${productContext.model || "Unknown"}
-
-Extract physical attributes. Keep rationale strings under 100 characters.
-
-1. WEIGHT (REQUIRED):
-   - Category: ${productContext.category}
-   - Estimate based on visible size + materials
-   - Add 15% for packaging
-   - Reference guide:
-     * Smartphone: 0.3-0.5 lbs
-     * Shoes (men): 1.5-2.5 lbs
-     * Laptop: 3-6 lbs
-     * T-shirt: 0.3-0.5 lbs
-     * Book: 0.5-2 lbs
-     * Toy figures: 0.2-0.4 lbs
-
-2. DIMENSIONS:
-   - Estimate packaging size
-   - Use visible reference objects
-
-3. CONDITION:
-   - 10-point scale (10=perfect, 1=parts only)
-   - List ALL flaws
-   - Grades: New(10), Like New(9-9.5), Very Good(8-8.5), Good(7-7.5), Acceptable(6-6.5), For Parts(1-3)
-
-IMPORTANT: Keep all text fields concise. Rationale must be under 100 characters.
-
-JSON:
-{
-  "weight": {
-    "estimatedLbs": number,
-    "estimatedOz": number,
-    "estimatedKg": number,
-    "confidenceLevel": "high|medium|low",
-    "requiresManualVerification": boolean,
-    "rationale": "string (max 100 chars)"
-  },
-  "dimensions": {
-    "length": number,
-    "width": number,
-    "height": number,
-    "unit": "inches",
-    "confidenceLevel": "high|medium|low"
-  },
-  "condition": {
-    "grade": "New|Like New|Very Good|Good|Acceptable|For parts or not working",
-    "numericScore": number,
-    "description": "string (max 200 chars)",
-    "flaws": ["string"]
-  },
-  "qualityChecks": {
-    "imageQuality": "excellent|good|acceptable|poor",
-    "imageQualityNotes": "string (max 150 chars)",
-    "informationCompleteness": 0-1,
-    "missingInformation": ["string"],
-    "recommendedAdditionalPhotos": ["string"]
-  }
-}
-`;
-
-    const parts = [{ text: prompt }];
-    for (const img of buffers) {
-      parts.push({
-        inlineData: {
-          data: img.buffer.toString("base64"),
-          mimeType: img.mimeType,
-        },
-      });
-    }
-
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts }],
-    });
-
-    const text = result.response.text();
-
-    // ✅ Log full response for debugging
-    logger.debug("Phase 2 raw response length", {
-      correlationId,
-      responseLength: text?.length,
-    });
-
-    const cleaned = this._cleanJson(text);
-    const parsed = this._parseJson(cleaned, correlationId);
-
-    logger.info("Phase 2 complete", {
-      correlationId,
-      weight: parsed.weight?.estimatedLbs,
-      condition: parsed.condition?.grade,
-    });
-
-    return parsed;
-  }
-
-  // ===========================================================================
-  // PHASE 3: Pricing Strategy & Shipping
-  // ===========================================================================
-
-  async analyzePricingStrategy(
-    productContext,
-    physicalAttributes,
-    marketData,
-    sellerConfig,
-    correlationId
-  ) {
-    logger.info("Phase 3 - Pricing Strategy", { correlationId });
-
-    const model = this.genAI.getGenerativeModel({
-      model: this.reasoningModel,
-      generationConfig: {
-        maxOutputTokens: 2048,
-        temperature: 0.3,
-        responseMimeType: "application/json",
-      },
-    });
-
-    const marketDataStr =
-      marketData && marketData.length > 0
-        ? `Sold listings (${marketData.length}):
-${marketData
-  .slice(0, 10)
-  .map(
-    (item) =>
-      `- $${item.price} | ${item.condition} | ${item.title.substring(0, 50)}`
-  )
-  .join("\n")}`
-        : "No market data";
-
-    // ✅ SIMPLIFIED PROMPT - Much shorter, more direct
-    const prompt = `
-Product: ${productContext.category || "Unknown"} | ${
-      productContext.brand || "Unknown"
-    } | ${productContext.model || "Unknown"}
-Condition: ${physicalAttributes.condition?.grade || "Unknown"} (${
-      physicalAttributes.condition?.numericScore || "N/A"
-    }/10)
-Weight: ${physicalAttributes.weight?.estimatedLbs || 0} lbs
-
-Market: ${marketDataStr}
-
-Seller: ${sellerConfig?.shippingPreference || "Buyer pays"} shipping, ${
-      sellerConfig?.returnsAccepted ? "30-day" : "No"
-    } returns
-
-Generate pricing JSON. ALL text fields max 50 chars.
-
-{
-  "pricing": {
-    "suggestedPrice": number,
-    "priceRange": {"min": number, "max": number},
-    "currency": "USD",
-    "confidenceScore": 0-1,
-    "rationale": "brief (max 50 chars)",
-    "marketAnalysis": {
-      "soldListingsAnalyzed": ${marketData?.length || 0},
-      "averageSoldPrice": null,
-      "priceDistribution": "brief (max 50 chars)",
-      "competitivePosition": "brief (max 50 chars)"
-    },
-    "strategyRecommendation": {
-      "listingFormat": "Fixed Price",
-      "auctionStartPrice": null,
-      "bestOfferEnabled": true,
-      "bestOfferAutoAccept": null,
-      "bestOfferAutoDecline": null,
-      "shippingStrategy": "Buyer Pays",
-      "reasoning": "brief (max 50 chars)"
-    }
-  },
-  "shipping": {
-    "recommendedService": "USPS Priority Mail",
-    "estimatedCost": number,
-    "handlingTime": "1 business day",
-    "packageType": "Box",
-    "requiresSignature": false,
-    "fragile": false,
-    "sellerTemplateMatch": null
-  }
-}
-
-Rules:
-- Price based on condition: Good -15%
-- Best Offer if price > $30
-- Keep ALL strings under 50 characters
-`;
-
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
-
-    // ✅ Log response for debugging
-    logger.debug("Phase 3 raw response", {
-      correlationId,
-      responseLength: text?.length,
-      preview: text.slice(0, 200),
-    });
-
-    const cleaned = this._cleanJson(text);
-    const parsed = this._parseJson(cleaned, correlationId);
-
-    logger.info("Phase 3 complete", {
-      correlationId,
-      price: parsed.pricing?.suggestedPrice,
-      format: parsed.pricing?.strategyRecommendation?.listingFormat,
-    });
-
-    return parsed;
-  }
-
-  // ===========================================================================
-  // PHASE 4: Listing Content - Title, Description, SEO
-  // ===========================================================================
-
-  async generateListingContent(
-    productContext,
-    physicalAttributes,
-    pricingStrategy,
-    correlationId
-  ) {
-    logger.info("Phase 4 - Listing Content", { correlationId });
-
-    const model = this.genAI.getGenerativeModel({
-      model: this.reasoningModel,
-      generationConfig: {
-        maxOutputTokens: 4096,
-        temperature: 0.7,
-        responseMimeType: "application/json",
-      },
-    });
-
-    // ✅ Extract actual values to use
-    const brand = productContext.brand || "Unbranded";
-    const model_name = productContext.model || "N/A";
-    const category = productContext.category || "Unknown";
-    const condition = physicalAttributes.condition?.grade || "Used";
-
-    const prompt = `
-Generate eBay listing for this product:
-
-PRODUCT DETAILS (use these exact values):
-- Brand: ${brand}
-- Model: ${model_name}
-- Category: ${category}
-- Condition: ${condition} (${
-      physicalAttributes.condition?.numericScore || "N/A"
-    }/10)
-- Price: $${pricingStrategy.pricing?.suggestedPrice || 0}
-- Weight: ${physicalAttributes.weight?.estimatedLbs || 0} lbs
-- Flaws: ${physicalAttributes.condition?.flaws?.join(", ") || "None"}
-
-Generate listing with description under 400 words.
-
-JSON OUTPUT (use ACTUAL values from above, NOT placeholders):
-{
-  "title": "string (80 chars max) - Use: ${brand} ${model_name} [key feature] ${condition}",
-  "subtitle": null,
-  "description": {
-    "plainText": "string (400 words max)",
-    "structure": {
-      "hook": "2-3 sentence opening",
-      "conditionDetails": "Honest assessment",
-      "keyFeatures": ["feature 1", "feature 2", "feature 3"],
-      "specifications": "Technical details",
-      "included": "What's in package",
-      "whyBuyFromMe": "Shipping/returns/seller highlights"
-    }
-  },
-  "seoOptimization": {
-    "primaryKeywords": ["${brand.toLowerCase()}", "${category.toLowerCase()}", "${model_name.toLowerCase()}"],
-    "secondaryKeywords": ["related keyword 1", "related keyword 2"],
-    "longtailKeywords": ["long phrase 1", "long phrase 2"],
-    "competitorKeywords": ["competitor keyword"],
-    "searchVolume": "analysis string"
-  },
-  "itemSpecifics": {
-    "Brand": "${brand}",
-    "Model": "${model_name}",
-    "Condition": "${condition}",
-    "Type": "describe product type",
-    "Color": "visible color or null",
-    "Material": "material type or null",
-    "Character": "character name if toy/collectible, else null",
-    "Year": "year if visible, else null"
-  },
-  "listingRecommendations": {
-    "bestOfferEnabled": true,
-    "internationalShipping": false,
-    "returnsAccepted": true,
-    "returnPeriod": "30 days",
-    "returnShippingPaidBy": "Buyer",
-    "promotedListings": {
-      "recommended": false,
-      "suggestedAdRate": "5%",
-      "reasoning": "brief reasoning"
-    }
-  },
-  "complianceFlags": {
-    "brandAuthenticity": "likely authentic",
-    "prohibitedItems": false,
-    "restrictedCategories": false,
-    "requiresAdditionalDisclosures": false,
-    "warnings": []
-  }
-}
-
-CRITICAL RULES:
-1. itemSpecifics MUST use actual values from product details above
-2. Do NOT use "string" or null for Brand, Model, or Condition
-3. Title format: ${brand} ${model_name} [Feature] ${condition}
-4. Fill in Color, Material, Type based on visible product features
-5. Keep description under 400 words
-6. Use actual brand/model in SEO keywords
-`;
-
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
-
-    logger.debug("Phase 4 raw response", {
-      correlationId,
-      responseLength: text?.length,
-      preview: text.slice(0, 200),
-    });
-
-    const cleaned = this._cleanJson(text);
-    const parsed = this._parseJson(cleaned, correlationId);
-
-    // ✅ POST-PROCESS: Ensure item specifics are filled
-    if (parsed.itemSpecifics) {
-      // Force fill required fields if they're empty
-      if (
-        !parsed.itemSpecifics.Brand ||
-        parsed.itemSpecifics.Brand === "string"
-      ) {
-        parsed.itemSpecifics.Brand = brand;
-      }
-      if (
-        !parsed.itemSpecifics.Model ||
-        parsed.itemSpecifics.Model === "string"
-      ) {
-        parsed.itemSpecifics.Model = model_name;
-      }
-      if (
-        !parsed.itemSpecifics.Condition ||
-        parsed.itemSpecifics.Condition === "string"
-      ) {
-        parsed.itemSpecifics.Condition = condition;
-      }
-
-      // Remove null/placeholder values
-      Object.keys(parsed.itemSpecifics).forEach((key) => {
-        if (
-          parsed.itemSpecifics[key] === null ||
-          parsed.itemSpecifics[key] === "null" ||
-          parsed.itemSpecifics[key] === "string" ||
-          parsed.itemSpecifics[key] === ""
-        ) {
-          delete parsed.itemSpecifics[key];
-        }
-      });
-
-      logger.debug("Item specifics after cleanup", {
-        correlationId,
-        itemSpecifics: parsed.itemSpecifics,
-      });
-    }
-
-    logger.info("Phase 4 complete", {
-      correlationId,
-      titleLength: parsed.title?.length,
-      keywordsCount: parsed.seoOptimization?.primaryKeywords?.length,
-      itemSpecificsCount: Object.keys(parsed.itemSpecifics || {}).length,
-    });
-
-    return parsed;
-  }
+  // (You can keep extractPhysicalAttributes, analyzePricingStrategy,
+  //  generateListingContent as-is if other callers still use them.)
 
   // ===========================================================================
   // UTILITIES
   // ===========================================================================
-
-  // services/ai.agentic.js
 
   _cleanJson(text) {
     if (!text || typeof text !== "string") return "";
 
     let cleaned = text.trim();
 
-    // 1️⃣ Remove markdown code fences (``` or ```json)
+    // Remove markdown fences
     cleaned = cleaned.replace(/^```[a-zA-Z]*\s*/, "");
     cleaned = cleaned.replace(/\s*```$/i, "");
     cleaned = cleaned.replace(/```/g, "");
     cleaned = cleaned.trim();
 
-    // 2️⃣ Extract JSON object boundaries
+    // Extract JSON object boundaries
     const firstBrace = cleaned.indexOf("{");
     const lastBrace = cleaned.lastIndexOf("}");
 
     if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
       cleaned = cleaned.substring(firstBrace, lastBrace + 1);
     } else if (firstBrace !== -1) {
-      // ⚠️ Truncated JSON — attempt recovery
       logger.warn("Attempting JSON recovery (truncated response detected)");
       cleaned = cleaned.substring(firstBrace);
       cleaned = this._attemptJsonRecovery(cleaned);
     } else {
-      // No JSON found at all
       throw new Error("No JSON object found in AI response");
     }
 
     return cleaned.trim();
   }
 
-  // Attempt to recover truncated JSON by closing open structures
   _attemptJsonRecovery(truncatedJson) {
     let braceCount = 0;
     let bracketCount = 0;
@@ -580,18 +877,15 @@ CRITICAL RULES:
       }
     }
 
-    // Close unterminated string
     if (inString) {
       truncatedJson += '"';
     }
 
-    // Close open arrays
     while (bracketCount > 0) {
       truncatedJson += "]";
       bracketCount--;
     }
 
-    // Close open objects
     while (braceCount > 0) {
       truncatedJson += "}";
       braceCount--;
@@ -609,14 +903,6 @@ CRITICAL RULES:
         preview: text.slice(0, 500),
       });
       throw new Error("Invalid JSON from AI");
-    }
-  }
-
-  _validateSchema(data, requiredFields) {
-    for (const field of requiredFields) {
-      if (!data[field]) {
-        throw new Error(`Missing required field: ${field}`);
-      }
     }
   }
 }
