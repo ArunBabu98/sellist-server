@@ -39,7 +39,7 @@ class GeminiService {
   get aiAgentic() {
     if (!this._aiAgentic) {
       // this._aiAgentic = require("./ai.agentic");
-      this._aiAgentic = require("./ai.agentic2");
+      this._aiAgentic = require("./ai.agentic");
     }
     return this._aiAgentic;
   }
