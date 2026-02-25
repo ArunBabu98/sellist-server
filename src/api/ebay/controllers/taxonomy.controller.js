@@ -15,17 +15,15 @@ class TaxonomyController {
       }
 
       logger.info("Getting category suggestions", { title });
-      const suggestions = await taxonomyService.suggestCategory(title);
+      const suggestions = await taxonomyService.suggestCategory({
+        title: title.trim(),
+        categoryPath: null,
+      });
       successResponse(res, suggestions);
     } catch (error) {
       logger.error("Category suggestion failed", { error: error.message });
 
-      const fallback = {
-        categoryId: "220",
-        categoryName: "Toys & Hobbies",
-        allSuggestions: [],
-        error: error.message,
-      };
+      errorResponse(res, error.message, 500);
 
       successResponse(res, fallback);
     }
