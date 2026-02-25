@@ -15,10 +15,7 @@ class TaxonomyController {
       }
 
       logger.info("Getting category suggestions", { title });
-      const suggestions = await taxonomyService.suggestCategory(
-        title,
-        itemSpecifics
-      );
+      const suggestions = await taxonomyService.suggestCategory(title);
       successResponse(res, suggestions);
     } catch (error) {
       logger.error("Category suggestion failed", { error: error.message });
@@ -54,7 +51,7 @@ class TaxonomyController {
         res,
         "Failed to get category aspects",
         500,
-        error.response?.data
+        error.response?.data,
       );
     }
   }

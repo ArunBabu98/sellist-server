@@ -55,7 +55,7 @@ class AIAgentic {
         details: visualSnapshot,
         metadata: {
           correlationId: cid,
-          code: code,
+          code: visualSnapshot.compliance?.code ?? null,
           processingTime: Date.now() - startTime,
         },
       };
