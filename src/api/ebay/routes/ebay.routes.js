@@ -17,12 +17,21 @@ const router = express.Router();
 
 // All routes require API key
 router.use(verifyApiKey);
-router.use(authenticate);
 
 // Auth routes
-router.get("/auth-url", authController.generateAuthUrl);
-router.post("/exchange-token", tokenLimiter, authController.exchangeToken);
-router.post("/refresh-token", tokenLimiter, authController.refreshToken);
+router.get("/auth-url", authenticate, authController.generateAuthUrl);
+router.post(
+  "/exchange-token",
+  tokenLimiter,
+  authenticate,
+  authController.exchangeToken,
+);
+router.post(
+  "/refresh-token",
+  tokenLimiter,
+  authenticate,
+  authController.refreshToken,
+);
 router.get("/user-profile", verifyBearerToken, authController.getUserProfile);
 router.get("/get-token", verifyBearerToken, authController.getToken);
 
