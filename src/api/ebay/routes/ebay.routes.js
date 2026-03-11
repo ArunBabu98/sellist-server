@@ -7,14 +7,17 @@ const mediaController = require("../controllers/media.controller");
 const setupController = require("../controllers/setup.controller");
 const {
   verifyApiKey,
+  authenticate,
   verifyBearerToken,
 } = require("../../../middleware/auth.middleware");
 const { tokenLimiter } = require("../../../middleware/rateLimit.middleware");
+const { requireCredits } = require("../../../middleware/credits.middleware");
 
 const router = express.Router();
 
 // All routes require API key
 router.use(verifyApiKey);
+router.use(authenticate);
 
 // Auth routes
 router.get("/auth-url", authController.generateAuthUrl);
@@ -27,14 +30,14 @@ router.get("/get-token", verifyBearerToken, authController.getToken);
 router.post("/suggest-category", taxonomyController.suggestCategory);
 router.get(
   "/category-aspects/:categoryId",
-  taxonomyController.getCategoryAspects
+  taxonomyController.getCategoryAspects,
 );
 
 // Drafting
 router.post(
   "/draft/batch",
   verifyBearerToken,
-  draftingController.batchCreateDrafts
+  draftingController.batchCreateDrafts,
 );
 
 router.get("/drafts", verifyBearerToken, draftingController.getDraftOffers);
@@ -43,7 +46,8 @@ router.get("/drafts", verifyBearerToken, draftingController.getDraftOffers);
 router.post(
   "/publish-listing",
   verifyBearerToken,
-  listingController.publishListing
+  requireCredits("LISTCRED", 1),
+  listingController.publishListing,
 );
 
 // Media routes
@@ -54,13 +58,13 @@ router.post("/upload-image", verifyBearerToken, mediaController.uploadImage);
 router.post(
   "/opt-in-policies",
   verifyBearerToken,
-  setupController.optInPolicies
+  setupController.optInPolicies,
 );
 
 router.post(
   "/create-location",
   verifyBearerToken,
-  setupController.createLocation
+  setupController.createLocation,
 );
 
 // ✅ NEW
@@ -72,7 +76,8 @@ router.get("/locations", verifyBearerToken, setupController.getLocations);
 router.post(
   "/publish-offer",
   verifyBearerToken,
-  listingController.publishDraftOffer
+  requireCredits("LISTCRED", 1),
+  listingController.publishDraftOffer,
 );
 
 module.exports = router;

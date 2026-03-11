@@ -1,12 +1,17 @@
 const express = require("express");
-const { verifyApiKey } = require("../../../middleware/auth.middleware");
+const {
+  verifyApiKey,
+  authenticate,
+} = require("../../../middleware/auth.middleware");
 const { apiLimiter } = require("../../../middleware/rateLimit.middleware");
 const geminiController = require("../controllers/gemini.controller");
+const { requireCredits } = require("../../../middleware/credits.middleware");
 
 const router = express.Router();
 
 // All routes require API key + generic API limiter
 router.use(verifyApiKey);
+router.use(authenticate);
 router.use(apiLimiter);
 
 /**
@@ -15,7 +20,11 @@ router.use(apiLimiter);
  * @access  Private (API Key required)
  * @body    { imageBase64: string, mimeType?: string, options?: object }
  */
-router.post("/analyze-image", geminiController.analyzeImage);
+router.post(
+  "/analyze-image",
+  requireCredits("AICRED", 1),
+  geminiController.analyzeImage,
+);
 
 /**
  * @route   POST /api/ai/analyze-images
@@ -23,7 +32,11 @@ router.post("/analyze-image", geminiController.analyzeImage);
  * @access  Private (API Key required)
  * @body    { images: [{ imageBase64: string, mimeType?: string }], options?: object }
  */
-router.post("/analyze-images", geminiController.analyzeImages);
+router.post(
+  "/analyze-images",
+  requireCredits("AICRED", 1),
+  geminiController.analyzeImages,
+);
 
 /**
  * @route   POST /api/ai/analyze-bulk
@@ -31,7 +44,11 @@ router.post("/analyze-images", geminiController.analyzeImages);
  * @access  Private (API Key required)
  * @body    { images: [{ imageBase64: string, mimeType?: string }], options?: object }
  */
-router.post("/analyze-bulk", geminiController.analyzeBulkProducts);
+router.post(
+  "/analyze-bulk",
+  requireCredits("AICRED", 1),
+  geminiController.analyzeBulkProducts,
+);
 
 /**
  * @route   POST /api/ai/generate-html

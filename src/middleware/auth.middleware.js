@@ -1,3 +1,4 @@
+const jwt = require("jsonwebtoken");
 const logger = require("../config/logger.config");
 const config = require("../config");
 const { errorResponse } = require("../utils/apiResponse");
@@ -24,7 +25,30 @@ const verifyBearerToken = (req, res, next) => {
   next();
 };
 
+const authenticate = (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return errorResponse(res, "No access token provided", 401);
+  }
+
+  const token = authHeader.substring(7);
+
+  try {
+    const payload = jwt.verify(token, config.jwtSecret);
+    req.userId = payload.userId;
+    next();
+  } catch (err) {
+    logger.warn("Invalid JWT attempt", { ip: req.ip, error: err.message });
+    return errorResponse(res, "Token expired or invalid", 401);
+  }
+};
+
+const verifyApiKeyAndUser = [verifyApiKey, authenticate];
+
 module.exports = {
   verifyApiKey,
   verifyBearerToken,
+  authenticate,
+  verifyApiKeyAndUser,
 };

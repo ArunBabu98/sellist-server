@@ -6,6 +6,7 @@ const {
   errorResponse,
 } = require("../../../utils/apiResponse");
 const logger = require("../../../config/logger.config");
+const { deductSafe } = require("../../../utils/deductSafe");
 
 class GeminiController {
   constructor() {
@@ -72,6 +73,7 @@ class GeminiController {
 
       // ✅ Extract and format category info for client
       const categoryInfo = this._extractCategoryInfo(listingPayload);
+      await deductSafe(req);
 
       return successResponse(
         res,
@@ -268,6 +270,7 @@ class GeminiController {
 
       // ✅ Extract and format category info for client
       const categoryInfo = this._extractCategoryInfo(listingPayload);
+      await deductSafe(req);
 
       return successResponse(
         res,
@@ -380,6 +383,7 @@ class GeminiController {
         requestId,
         productsDetected: products.length,
       });
+      await deductSafe(req);
 
       return successResponse(
         res,

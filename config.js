@@ -12,6 +12,7 @@ const config = {
 
   // Security
   apiKey: process.env.API_KEY,
+  jwtSecret: process.env.JWT_SECRET,
   allowedOrigins: process.env.ALLOWED_ORIGINS?.split(",") || [],
 
   // eBay
@@ -47,11 +48,11 @@ const validateConfig = () => {
 
   if (missing.length > 0) {
     console.error(
-      `❌ Missing required environment variables: ${missing.join(", ")}`
+      `❌ Missing required environment variables: ${missing.join(", ")}`,
     );
     console.error(`💡 For development: node --env-file=.env server.js`);
     console.error(
-      `💡 For production: Set environment variables in deployment platform`
+      `💡 For production: Set environment variables in deployment platform`,
     );
     process.exit(1);
   }

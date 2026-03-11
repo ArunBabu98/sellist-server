@@ -5,6 +5,7 @@ const {
 } = require("../../../utils/apiResponse");
 const logger = require("../../../config/logger.config");
 const publishService = require("../services/publish.service");
+const { deductSafe } = require("../../../utils/deductSafe");
 
 class ListingController {
   async publishListing(req, res) {
@@ -21,13 +22,15 @@ class ListingController {
 
       const result = await listingService.publishListing(
         accessToken,
-        listingData
+        listingData,
       );
 
       logger.info("Listing published successfully", {
         listingId: result.listingId,
         sku: result.sku,
       });
+
+      await deductSafe(req);
 
       successResponse(res, result, "Listing published successfully");
     } catch (error) {
@@ -64,6 +67,7 @@ class ListingController {
       await publishService.publishOffer(accessToken, offerId);
 
       logger.info("Draft offer published", { offerId });
+      await deductSafe(req);
 
       successResponse(res, { offerId }, "Offer published successfully");
     } catch (error) {

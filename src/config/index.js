@@ -8,6 +8,7 @@ const config = {
   nodeEnv: process.env.NODE_ENV || "development",
   port: parseInt(process.env.PORT || "3000", 10),
   apiKey: process.env.API_KEY,
+  jwtSecret: process.env.JWT_SECRET,
 
   // Security
   allowedOrigins: (process.env.ALLOWED_ORIGINS || "")
@@ -58,7 +59,7 @@ const validateConfig = () => {
   if (missing.length > 0) {
     console.error("\n❌ CONFIGURATION ERROR ❌\n");
     console.error(
-      `Missing required environment variables: ${missing.join(", ")}\n`
+      `Missing required environment variables: ${missing.join(", ")}\n`,
     );
     console.error("Please check your .env file contains:");
     missing.forEach((key) => {
@@ -66,7 +67,7 @@ const validateConfig = () => {
     });
     console.error("\n💡 Development: npm run dev (uses --env-file=.env)");
     console.error(
-      "💡 Production: Set environment variables in your deployment platform\n"
+      "💡 Production: Set environment variables in your deployment platform\n",
     );
     process.exit(1);
   }
@@ -78,7 +79,7 @@ const validateConfig = () => {
     console.log(`   Environment: ${config.nodeEnv}`);
     console.log(`   Port: ${config.port}`);
     console.log(
-      `   eBay Mode: ${config.ebay.useSandbox ? "🧪 Sandbox" : "🚀 Production"}`
+      `   eBay Mode: ${config.ebay.useSandbox ? "🧪 Sandbox" : "🚀 Production"}`,
     );
     console.log(`   API Key: ${config.apiKey ? "✓ Set" : "✗ Missing"}`);
     console.log(`   eBay App ID: ${config.ebay.appId?.substring(0, 20)}...`);
