@@ -1,10 +1,10 @@
+require('dotenv').config();
 require("./src/config/env");
 
 const app = require("./src/app");
 const config = require("./src/config");
 const logger = require("./src/config/logger.config");
 const { getLocalIP } = require("./src/utils/helpers");
-require("dotenv").config();
 
 // Graceful shutdown handler
 function gracefulShutdown(signal, server) {
