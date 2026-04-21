@@ -9,6 +9,7 @@ const {
   verifyApiKey,
   authenticate,
   verifyBearerToken,
+  extractEbayToken,
 } = require("../../../middleware/auth.middleware");
 const { tokenLimiter } = require("../../../middleware/rateLimit.middleware");
 const { requireCredits } = require("../../../middleware/credits.middleware");
@@ -54,7 +55,8 @@ router.get("/drafts", verifyBearerToken, draftingController.getDraftOffers);
 // Listing routes
 router.post(
   "/publish-listing",
-  verifyBearerToken,
+  authenticate,
+  extractEbayToken,
   requireCredits("LISTCRED", 1),
   listingController.publishListing,
 );
@@ -84,8 +86,8 @@ router.get("/locations", verifyBearerToken, setupController.getLocations);
 // Listing routes
 router.post(
   "/publish-offer",
-  verifyBearerToken,
   authenticate,
+  extractEbayToken,
   requireCredits("LISTCRED", 1),
   listingController.publishDraftOffer,
 );

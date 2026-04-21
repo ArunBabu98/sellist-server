@@ -44,11 +44,21 @@ const authenticate = (req, res, next) => {
   }
 };
 
+const extractEbayToken = (req, res, next) => {
+  const ebayToken = req.headers["x-ebay-access-token"];
+  if (!ebayToken) {
+    return errorResponse(res, "No eBay access token provided", 401);
+  }
+  req.accessToken = ebayToken; // controllers already use req.accessToken
+  next();
+};
+
 const verifyApiKeyAndUser = [verifyApiKey, authenticate];
 
 module.exports = {
   verifyApiKey,
   verifyBearerToken,
   authenticate,
+  extractEbayToken,
   verifyApiKeyAndUser,
 };
