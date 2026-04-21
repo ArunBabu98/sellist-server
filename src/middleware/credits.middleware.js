@@ -12,6 +12,10 @@ const requireCredits = (currencyCode, amount) => {
         .prepare("SELECT rc_id FROM users WHERE id = ?")
         .get(req.userId);
 
+      console.log(
+        `[requireCredits] userId=${req.userId} | rc_id=${user?.rc_id} | checking ${currencyCode}>=${amount}`,
+      );
+
       if (!user?.rc_id) {
         return res.status(402).json({
           error: "insufficient_credits",
@@ -20,8 +24,15 @@ const requireCredits = (currencyCode, amount) => {
       }
 
       const data = await getBalances(user.rc_id);
+
+      console.log(`[requireCredits] RC response: ${JSON.stringify(data)}`);
+
       const balance =
         data.items?.find((i) => i.currency_code === currencyCode)?.balance ?? 0;
+
+      console.log(
+        `[requireCredits] ${currencyCode} balance=${balance} | required=${amount} | pass=${balance >= amount}`,
+      );
 
       if (balance < amount) {
         return res.status(402).json({
@@ -32,10 +43,10 @@ const requireCredits = (currencyCode, amount) => {
         });
       }
 
-      // Attach deduct fn — called after successful action
       req.deductCredits = () => deductCredits(user.rc_id, currencyCode, amount);
       next();
     } catch (err) {
+      console.error(`[requireCredits] ERROR: ${err.message}`);
       next(err);
     }
   };
