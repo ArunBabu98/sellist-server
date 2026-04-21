@@ -85,6 +85,7 @@ router.get("/locations", verifyBearerToken, setupController.getLocations);
 router.post(
   "/publish-offer",
   verifyBearerToken,
+  authenticate,
   requireCredits("LISTCRED", 1),
   listingController.publishDraftOffer,
 );
